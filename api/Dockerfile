@@ -4,12 +4,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     LOG_FILE=logs/api.log \
     LOG_FORMAT=text \
-    DB_HOST=localhost \
+    DB_HOST=db \
     DB_NAME=linkly \
     DB_USER=linkly \
     DB_PASSWORD="" \
-    DB_PASSWORD_FILE= \
-    REDIS_HOST=localhost 
+    DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
+    REDIS_HOST=redis 
 
 WORKDIR /app
 

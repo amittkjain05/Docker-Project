@@ -2,15 +2,15 @@ FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DB_HOST=localhost \
+    DB_HOST=db \
     DB_NAME=linkly \
     DB_USER=linkly \
     DB_PASSWORD="" \
-    DB_PASSWORD_FILE= \
-    REDIS_HOST=localhost \
+    DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
+    REDIS_HOST=redis \
     REPORT_DIR=reports \
     REPORT_INTERVAL=86400 \
-    WEBHOOK_URL="https://httpbin.org/post" \
+    WEBHOOK_URL= \
     HEARTBEAT_FILE=/tmp/worker-heartbeat 
 
 
