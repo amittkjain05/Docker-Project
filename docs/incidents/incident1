@@ -1,0 +1,11 @@
+Incident 1 :
+While starting the WORKER container hitting this issue.
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='httpbin.org', port=443): Max retries exceeded with url: /post (Caused by NameResolutionError("HTTPSConnection(host='httpbin.org', port=443): Failed to resolve 'httpbin.org' ([Errno -3] Temporary failure in name resolution)"))
+
+Root cause : there is a environment variable which has the value of a webhook to which the WORKER will push the reports. Since the WORKER is in internal network it can not acceesss the internet and failing to resolve the webhoot hostname.
+
+Workaround : Provide enpty value for the webhook variable.
+
+Incident 2 :
+Container start order should be : DB -> Redis -> API -> WORKER/PROXY
+
