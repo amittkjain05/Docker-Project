@@ -3,7 +3,7 @@ FROM python:3.12-slim-bookworm
 ENV PATH=/opt/venv/bin:$PATH \ 
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DB_HOST=db \
+    DB_HOST=pgsql \
     DB_NAME=linkly \
     DB_USER=linkly \
     DB_PASSWORD="" \

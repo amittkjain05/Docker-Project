@@ -16,7 +16,7 @@ PROXY_DMZ_IP=$(get_ip proxy dmz)
 API_DMZ_IP=$(get_ip api dmz)
 API_INT_IP=$(get_ip api internal)
 CACHE_INT_IP=$(get_ip redis internal)
-DB_INT_IP=$(get_ip db internal)
+DB_INT_IP=$(get_ip pgsql internal)
 WORKER_INT_IP=$(get_ip worker internal)
 
 # 3. Dynamically extract subnet CIDRs

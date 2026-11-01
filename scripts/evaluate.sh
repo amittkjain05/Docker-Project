@@ -17,7 +17,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS="$REPO_DIR/scripts"
 RUN_DIR="$REPO_DIR/logs/evaluate-$(date -u +%Y%m%dT%H%M%SZ)"
 
-SERVICES=(db redis api worker proxy)    # long-running containers started by up.sh
+SERVICES=(pgsql redis api worker proxy)    # long-running containers started by up.sh
 UP_TIME_LIMIT=600                       # seconds (10 minutes)
 BASE_URL="https://localhost"            # the proxy, as a user would reach it
 API_IMAGE_LIMIT_MB=200                  # 1 MB = 1,000,000 bytes, as docker reports sizes
@@ -63,10 +63,11 @@ fmt_time() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 # "healthy", "running" (no healthcheck), "unhealthy", "starting", "exited", "missing", ...
 service_state() {
     local running health status
-    read -r status running health < <(docker inspect -f \
+    read -r status running health < <(docker container inspect -f \
         '{{.State.Status}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
         "$1" 2>/dev/null) || { echo missing; return; }
-    if [[ "$running" != "true" ]]; then echo "$status"
+    # A crash-looping container is "restarting" but still has Running=true.
+    if [[ "$running" != "true" || "$status" != running ]]; then echo "$status"
     elif [[ -n "${health:-}" ]]; then echo "$health"
     else echo running
     fi
@@ -83,9 +84,9 @@ NEW_SESSION=(
     bash --noprofile --norc
 )
 
-# Run a SQL query in the db container (local socket, no password needed).
+# Run a SQL query in the pgsql container (local socket, no password needed).
 db_query() {
-    docker exec db psql -U linkly -d linkly -tAc "$1" 2>>"$RUN_DIR/db_query.log"
+    docker exec pgsql psql -U linkly -d linkly -tAc "$1" 2>>"$RUN_DIR/db_query.log"
 }
 
 # curl through the proxy; -k because the certificate is self-signed.
@@ -116,11 +117,21 @@ ensure_link() {
     fi
 }
 
+# Run down.sh in a new session, logging to the given file. On failure, show its
+# warnings in the details so the reason is visible without opening the log.
+run_down() { # logfile [down.sh args...]
+    local logfile="$1" line; shift
+    "${NEW_SESSION[@]}" "$SCRIPTS/down.sh" "$@" >"$RUN_DIR/$logfile" 2>&1 && return 0
+    detail "down.sh reported problems (see $logfile):"
+    while IFS= read -r line; do detail "  $line"; done \
+        < <(grep -E 'WARNING|ERROR' "$RUN_DIR/$logfile" | tail -n 5)
+    return 1
+}
+
 # Run down.sh then up.sh in new sessions; logs go to <prefix>-down.log / -up.log.
 restart_stack() {
     local prefix="$1" rc
-    "${NEW_SESSION[@]}" "$SCRIPTS/down.sh" >"$RUN_DIR/$prefix-down.log" 2>&1 \
-        || detail "note: down.sh reported warnings (see $prefix-down.log)"
+    run_down "$prefix-down.log" || true
     ( cd "$REPO_DIR" && timeout --foreground "$UP_TIME_LIMIT" \
         "${NEW_SESSION[@]}" "$SCRIPTS/up.sh" ) >"$RUN_DIR/$prefix-up.log" 2>&1
     rc=$?
@@ -139,8 +150,7 @@ criterion_up_healthy() {
 
     (( COLD )) && down_args=(--volumes)
     log "resetting to a clean state with down.sh${down_args[*]:+ ${down_args[*]}}"
-    "${NEW_SESSION[@]}" "$SCRIPTS/down.sh" "${down_args[@]}" >"$RUN_DIR/down.log" 2>&1 \
-        || detail "note: down.sh reported warnings (see down.log)"
+    run_down down.log "${down_args[@]}" || true
     if (( COLD )); then
         # Remove the app images so up.sh has to pull them, as on a new machine.
         local repo tag
@@ -151,9 +161,15 @@ criterion_up_healthy() {
         fi
     fi
 
+    local leftover=0
     for c in "${SERVICES[@]}"; do
-        [[ "$(service_state "$c")" == missing ]] || { detail "'$c' still exists after down.sh"; return 1; }
+        state=$(service_state "$c")
+        if [[ "$state" != missing ]]; then
+            detail "'$c' still exists after down.sh (state: $state); remove it with: docker rm -f $c"
+            leftover=1
+        fi
     done
+    (( leftover )) && return 1
 
     log "running up.sh (limit $(fmt_time "$UP_TIME_LIMIT")); output in up.log"
     start=$(date +%s)
@@ -455,7 +471,7 @@ criterion_durability() {
 
     ensure_link || return 1
     before=$(db_query 'SELECT count(*) FROM links')
-    [[ "$before" =~ ^[0-9]+$ ]] || { detail "could not count links before (is db up?)"; return 1; }
+    [[ "$before" =~ ^[0-9]+$ ]] || { detail "could not count links before (is pgsql up?)"; return 1; }
     detail "links before: $before"
 
     log "restarting the stack with down.sh and up.sh"
