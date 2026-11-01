@@ -1,83 +1,65 @@
-# From \ To       api :5000   db :5432    cache :6379     Internet (1.1.1.1:443)
-# proxy           Allowed      Blocked    Blocked         Allowed
-# api             —            Allowed    Allowed         Allowed
-# worker          Blocked      Allowed    Allowed         Blocked
-# cache           Allowed      Allowed     —              Blocked
-# db              Allowed      -           Allowed        Blocked    
-# backup-job      Blocked      Allowed    Blocked         Blocked
-
 #!/usr/bin/env bash
+# Test every cell of the reachability matrix from inside each service's network namespace.
+# Exits non-zero if any cell differs from the expected result.
+set -euo pipefail
 
-set -u
+PROBE_IMAGE="python:3.12-slim-bookworm"
+PROBE='
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+try:
+    ip = socket.gethostbyname(host)
+except OSError:
+    print("no-dns"); sys.exit(0)
+try:
+    socket.create_connection((ip, port), 3).close(); print("open")
+except OSError:
+    print("timeout")
+'
 
-if ! command -v docker >/dev/null 2>&1; then
-    echo "docker could not be found; install Docker and try again." >&2
-    exit 1
-fi
+# source  target   port  expected
+MATRIX="
+proxy   api      5000  allowed
+proxy   db       5432  blocked
+proxy   cache    6379  blocked
+proxy   1.1.1.1  443   allowed
+api     db       5432  allowed
+api     cache    6379  allowed
+api     1.1.1.1  443   allowed
+worker  api      5000  allowed
+worker  db       5432  allowed
+worker  cache    6379  allowed
+worker  1.1.1.1  443   blocked
+cache   api      5000  allowed
+cache   db       5432  allowed
+cache   1.1.1.1  443   blocked
+db      api      5000  allowed
+db      cache    6379  allowed
+db      1.1.1.1  443   blocked
+backup  api      5000  blocked
+backup  db       5432  allowed
+backup  cache    6379  blocked
+backup  1.1.1.1  443   blocked
+"
 
-containers=(proxy api worker redis db backup)
-for container in "${containers[@]}"; do
-    if ! running=$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null); then
-        echo "Container '$container' could not be inspected; start the project and try again." >&2
-        exit 1
-    fi
-    if [[ "$running" != "true" ]]; then
-        echo "Container '$container' is not running; start the project and try again." >&2
-        exit 1
-    fi
-done
-
-if ! docker image inspect busybox:1.36 >/dev/null 2>&1; then
-    if ! docker pull busybox:1.36; then
-        echo "Could not pull busybox:1.36, which is required for network checks." >&2
-        exit 1
-    fi
-fi
-
-probe() {
-    local source="$1"
-    local target="$2"
-    local port="$3"
-
-    if docker run --rm --network "container:$source" busybox:1.36 nc -zw3 "$target" "$port" >/dev/null 2>&1; then
-        printf 'Allowed'
-    else
-        printf 'Blocked'
-    fi
+probe() { # source target port
+  local net
+  if [ "$1" = "backup" ]; then
+    net="admin"            # the backup job is a throwaway container on admin only
+  else
+    net="container:$1"     # share the running service's network namespace
+  fi
+  docker run --rm --network "$net" --cap-drop ALL "$PROBE_IMAGE" python -c "$PROBE" "$2" "$3"
 }
 
-print_row() {
-    local label="$1"
-    local source="$2"
-    local api_status db_status cache_status internet_status
+fail=0
+printf '%-8s %-8s %-6s %-9s %-9s %s\n' FROM TO PORT EXPECTED ACTUAL RESULT
+while read -r src dst port expected; do
+  [ -z "$src" ] && continue
+  result="$(probe "$src" "$dst" "$port")"
+  if [ "$result" = "open" ]; then actual="allowed"; else actual="blocked"; fi
+  if [ "$actual" = "$expected" ]; then mark="PASS"; else mark="FAIL"; fail=1; fi
+  printf '%-8s %-8s %-6s %-9s %-9s %s (%s)\n' "$src" "$dst" "$port" "$expected" "$actual" "$mark" "$result"
+done <<< "$MATRIX"
 
-    if [[ "$source" == "api" ]]; then
-        api_status='—'
-    else
-        api_status=$(probe "$source" api 5000)
-    fi
-    if [[ "$source" == "db" ]]; then
-        db_status='—'
-    else
-        db_status=$(probe "$source" db 5432)
-    fi
-    if [[ "$source" == "redis" ]]; then
-        cache_status='—'
-    else
-        cache_status=$(probe "$source" redis 6379)
-    fi
-    internet_status=$(probe "$source" 1.1.1.1 443)
-
-    printf '%-14s %-12s %-12s %-14s %s\n' \
-        "$label" "$api_status" "$db_status" "$cache_status" "$internet_status"
-}
-
-printf '%-14s %-12s %-12s %-14s %s\n' \
-    'From \ To' 'api :5000' 'db :5432' 'cache :6379' 'Internet (1.1.1.1:443)'
-
-print_row proxy proxy
-print_row api api
-print_row worker worker
-print_row cache redis
-print_row db db
-print_row backup-job backup
+exit "$fail"
