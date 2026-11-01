@@ -74,9 +74,8 @@ You need all of the following on the machine that runs the containers.
 
 ### 1. Clone the repository
 
-`up.sh` looks for a folder called `Docker-Project` in the directory you run it
-from, so clone it with its default name and run the scripts from the **parent**
-folder:
+`up.sh` uses the clone it lives in, so you can run it from any folder. The
+examples below run the scripts from the parent folder of the clone:
 
 ```bash
 mkdir -p ~/linkly && cd ~/linkly
@@ -94,29 +93,23 @@ sudo chmod 644 /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD
 ```
 
 The files must be readable inside the containers, which run as non-root users
-(the API and worker as UID 10001), hence mode `644`. Keep the host itself
-restricted to trusted users.
+(the API and worker as UID 10001), hence mode `644`. `up.sh` checks these
+permissions and that both files hold the same password before starting
+anything. Keep the host itself restricted to trusted users.
 
 ### 3. Build the application images
 
-`up.sh` starts `${IMAGE_REPO}:api_app-${APP_TAG}` and `${IMAGE_REPO}:worker-${APP_TAG}`,
-where `APP_TAG` is the short git commit of the directory you run `up.sh` from,
-or `dev` if that directory isn't a git repository (the usual case when you run
-it from the parent folder).
+`up.sh` starts `${IMAGE_REPO}:api_app-${APP_TAG}` and `${IMAGE_REPO}:worker-${APP_TAG}`.
+Both are set at the top of [`scripts/up.sh`](scripts/up.sh):
+`IMAGE_REPO="amitjain6/linkly_app"` and `APP_TAG="67f6b8d"`, whose images are
+already on Docker Hub, so you can skip this step.
 
-First set `IMAGE_REPO` in [`scripts/up.sh`](scripts/up.sh) to a valid image
-name (see [Known issues](#known-issues)), for example:
-
-```bash
-IMAGE_REPO="amitjain6/linkly_app"
-```
-
-Then build and tag both images:
+To run your own build, build and tag both images, then set `APP_TAG` to your tag:
 
 ```bash
 cd ~/linkly/Docker-Project
-docker build -t amitjain6/linkly_app:api_app-dev api/
-docker build -t amitjain6/linkly_app:worker-dev worker/
+docker build -t amitjain6/linkly_app:api_app-mytag api/
+docker build -t amitjain6/linkly_app:worker-mytag worker/
 ```
 
 To share them, push to Docker Hub with `docker push`.
@@ -154,8 +147,25 @@ sudo bash Docker-Project/scripts/netcheck.sh
 ```
 
 It probes each source → target pair from inside the containers' network
-namespaces and prints PASS/FAIL per row. It exits non-zero if any row differs
-from the expected result.
+namespaces and prints PASS/FAIL per row. The backup rows use a throwaway
+container on the `admin` network, like `backup.sh`. The script exits non-zero
+if any row differs from the expected result.
+
+Expected results, matching the firewall `up.sh` applies:
+
+| From → To | api :5000 | db :5432 | redis :6379 | internet (1.1.1.1:443) |
+|---|---|---|---|---|
+| proxy | allowed | blocked | blocked | allowed |
+| api | — | allowed | allowed | allowed |
+| worker | blocked | allowed | allowed | blocked |
+| redis | blocked | blocked | — | blocked |
+| db | blocked | — | blocked | blocked |
+| backup | blocked | allowed | blocked | blocked |
+
+The last column on each row shows why it got that result: `open`, `timeout`
+(dropped by the firewall), `no-dns` (not on the same network), `unreachable`
+(no internet route) or `refused`. If a service isn't running, the script stops
+before probing.
 
 ## Using the API
 
@@ -193,9 +203,20 @@ proxy's own health check.
 ## Reports
 
 The worker writes `clicks-YYYY-MM-DD.csv` (code, click count) every
-`REPORT_INTERVAL` seconds (default 86400) to the `reports` volume. If
-`WEBHOOK_URL` is set, it also posts a summary there. `up.sh` leaves it empty
-because the worker has no internet access.
+`REPORT_INTERVAL` seconds (default 86400) to the `reports` volume, which is
+mounted at `/data/reports` inside the worker. If `WEBHOOK_URL` is set, it also
+posts a summary there. `up.sh` leaves it empty because the worker has no
+internet access.
+
+To list the reports:
+
+```bash
+sudo docker exec worker ls -l /data/reports
+```
+
+If the worker logs `Permission denied` for `/data/reports`, the `reports`
+volume was created by an older `up.sh` run with root ownership. Remove it with
+`sudo docker rm -f worker && sudo docker volume rm reports` and re-run `up.sh`.
 
 ## Backups
 
@@ -227,19 +248,21 @@ To take backups on a schedule, add a root cron job, for example daily at 02:00:
 sudo bash Docker-Project/scripts/down.sh
 ```
 
-This removes the containers and networks. The `pgdata`, `redisdata` and
-`reports` volumes are kept. To delete the data too:
+This:
+1. Stops the containers gracefully (up to 20 s each), so Postgres shuts down
+   cleanly and Redis saves its data, then removes them.
+2. Removes the `dmz`, `internal` and `admin` networks. If one is still in use
+   (for example by a running `backup.sh`), it names the container in the way.
+3. Resets the `DOCKER-USER` firewall chain to Docker's default.
+
+The `pgdata`, `redisdata` and `reports` volumes are kept. To delete all data
+(links, clicks and reports) as well:
 
 ```bash
-sudo docker volume rm pgdata redisdata reports
+sudo bash Docker-Project/scripts/down.sh --volumes
 ```
 
-The iptables rules stay in the `DOCKER-USER` chain until the next `up.sh` run
-or a reboot. To clear them by hand:
-
-```bash
-sudo iptables -F DOCKER-USER && sudo iptables -A DOCKER-USER -j RETURN
-```
+The script exits non-zero and prints a warning if any step fails.
 
 ## Repository layout
 
@@ -248,7 +271,7 @@ api/                 Flask API, Dockerfile, healthcheck
 worker/              Click worker, Dockerfile, healthcheck
 proxy/               nginx config, gen-cert.sh, Dockerfile (not used by up.sh)
 scripts/up.sh        Create networks/volumes, start containers, apply firewall
-scripts/down.sh      Remove containers and networks (keeps volumes)
+scripts/down.sh      Stop containers, remove networks, clear firewall (--volumes deletes data)
 scripts/backup.sh    One-off pg_dump to ./backups
 scripts/netcheck.sh  Test the reachability matrix
 scripts/iptable_rules.sh  Re-apply only the firewall rules
@@ -259,19 +282,5 @@ docs/incidents/      Incident notes
 
 These are open problems in the current scripts:
 
-- **`IMAGE_REPO` in `up.sh` is a web page URL**
-  (`https://hub.docker.com/repository/...`), which isn't a valid image name.
-  Change it to `amitjain6/linkly_app` before running (step 3).
-- **Worker report path:** the worker image writes reports to `/data/reports`, but
-  `up.sh` mounts the `reports` volume at `/app/reports` on a read-only
-  filesystem, so writing the first report fails and the worker restarts.
-  Workaround: add `-e REPORT_DIR=/app/reports` to the worker in `up.sh`.
-- **API temp directory:** the `api` container is read-only with no `/tmp` tmpfs,
-  which gunicorn needs. Workaround: add `"${TMPFS_TMP[@]}"` to the api in `up.sh`.
-- **Container name `cache`:** `down.sh` and `netcheck.sh` refer to `cache`, but
-  the Redis container is called `redis`. As a result `down.sh` leaves Redis
-  running and `netcheck.sh` stops early.
-- **netcheck expectations:** some rows (worker → api, redis/db → api, etc.)
-  expect traffic that the firewall blocks, so they report FAIL.
 - **Worker crash loop on webhook errors:** see
   [`docs/incidents/incident1`](docs/incidents/incident1).
