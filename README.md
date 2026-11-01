@@ -264,6 +264,46 @@ sudo bash Docker-Project/scripts/down.sh --volumes
 
 The script exits non-zero and prints a warning if any step fails.
 
+## Evaluation
+
+```bash
+sudo bash Docker-Project/scripts/evaluate.sh
+```
+
+This checks the project against a list of criteria and prints a PASS/FAIL
+summary. It exits non-zero if any criterion fails. Each run saves its logs and
+a `summary.txt` in `logs/evaluate-<timestamp>/`.
+
+**A full run restarts the stack twice** (`up_healthy` and `durability`) and
+**adds a test link** to the database. It also writes a backup file to
+`backups/`. Criteria run in the order below. Running a single criterion only
+does what that criterion needs.
+
+| Criterion | What it checks |
+|---|---|
+| `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`db`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
+| `reachability` | Runs [`netcheck.sh`](scripts/netcheck.sh) against the running stack. Passes if it exits 0, meaning every cell of the reachability matrix matches. On failure it lists the mismatched cells, or why netcheck couldn't run. Doesn't restart anything, so `evaluate.sh reachability` works on a stack that's already up. |
+| `dual_homed` | Reads the members of `dmz` and `internal` with `docker network inspect dmz internal`. Passes if `api` is the only container on both, so nothing else bridges the public-facing and data networks. Lists each network's containers, and saves the full inspect output as `network-inspect.json`. |
+| `published_ports` | Reads `docker ps --format '{{.Names}} {{.Ports}}'`. Passes if `proxy` is the only running container publishing ports on the host (shown as `host:port->container/tcp`). Ports that are only exposed inside the network, like the api's `5000/tcp`, don't count. Lists every container's ports and saves the output as `docker-ps.txt`. Any running container counts, including ones outside this project. |
+| `app_works` | Uses the README's curl commands through the proxy. `POST /links` must return 201 with a code. `GET /<code>` must redirect (302) to the URL. `GET /stats/<code>` must show at least 1 click within 30 s, after the worker moves it from Redis to Postgres. |
+| `api_image_size` | Reads the size of the image the `api` container runs with `docker image inspect -f '{{.Size}}'`. Passes if it's at most 200 MB (1 MB = 1,000,000 bytes, as Docker shows it). If `api` isn't running, it checks the image `up.sh` would start. |
+| `process_user` | Runs `docker top api -o user,pid,cmd` and the same for `worker`. Passes if no process in either runs as `root` (UID 0). Saves each listing as `top-<container>.txt`. |
+| `hardening` | Reads each service's `docker inspect` settings. Passes if every container has `CapDrop` containing `ALL`, `ReadonlyRootfs` true, a memory limit and a CPU limit. Lists any setting that's missing per container, and saves the full output as `hardening-inspect.json`. |
+| `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `/secrets` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
+| `durability` | Counts the rows in `links`, runs `down.sh` and `up.sh` (in new sessions), then counts again. Passes if the count is unchanged and the test link still exists. Creates a test link first if needed. |
+| `backup` | Runs [`backup.sh`](scripts/backup.sh), then checks that a new `.sql.gz` appeared in `backups/`, that it's a valid gzip file, and that `zcat` of it contains the test link's code as a `links` row. Creates a test link first if needed. |
+| `vulnerabilities` | Runs `trivy image --severity CRITICAL --ignore-unfixed --exit-code 1` on the `api` and `worker` images (the ones built from this repo). Passes if Trivy exits 0 for both, meaning no CRITICAL vulnerability that has a fix available. On failure it shows the count and the first few CVE/GHSA IDs; full reports are saved as `trivy-<container>.txt`. Uses an installed `trivy`, or else runs the `aquasec/trivy` image with the Docker socket mounted. The first run downloads Trivy's vulnerability database, so it needs internet access. |
+
+Options:
+- `--list`: show the criteria.
+- `<criterion-id> ...`: run only those criteria, for example `evaluate.sh up_healthy`.
+- `--cold`: also delete the data volumes and the cached app images first, to
+  time a first-ever deployment, including image pulls. **This deletes all data.**
+
+To add a criterion, write a `criterion_<id>` function in
+[`scripts/evaluate.sh`](scripts/evaluate.sh) that returns 0 for PASS and 1 for
+FAIL, and add `"<id>|<description>"` to the `CRITERIA` list.
+
 ## Repository layout
 
 ```
@@ -274,6 +314,7 @@ scripts/up.sh        Create networks/volumes, start containers, apply firewall
 scripts/down.sh      Stop containers, remove networks, clear firewall (--volumes deletes data)
 scripts/backup.sh    One-off pg_dump to ./backups
 scripts/netcheck.sh  Test the reachability matrix
+scripts/evaluate.sh  Evaluate the project against criteria (PASS/FAIL summary)
 scripts/iptable_rules.sh  Re-apply only the firewall rules
 docs/incidents/      Incident notes
 ```
