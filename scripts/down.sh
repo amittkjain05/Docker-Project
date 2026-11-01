@@ -30,20 +30,36 @@ failed=0
 # Containers: stop gracefully first so Postgres shuts down cleanly, Redis
 # flushes its append-only file and the worker finishes the click it's saving.
 # ---------------------------------------------------------------------------
+exists() { docker container inspect "$1" &>/dev/null; }
+
+# Remove a container, retrying a few times: one that is crash-looping can be
+# restarted by Docker in the moment between our stop and rm.
+remove_container() {
+    local c="$1" try err
+    for try in 1 2 3 4 5; do
+        err=$(docker rm -f "$c" 2>&1 >/dev/null) || true
+        exists "$c" || return 0
+        sleep 2
+    done
+    warn "could not remove container '$c' ($(docker container inspect -f '{{.State.Status}}' "$c" 2>/dev/null || echo unknown)): ${err:-no error from docker}"
+    return 1
+}
+
 present=()
 for c in "${CONTAINERS[@]}"; do
-    docker inspect "$c" &>/dev/null && present+=("$c")
+    exists "$c" && present+=("$c")
 done
 
 if (( ${#present[@]} )); then
+    # Turn off --restart unless-stopped first, so a container stuck in a
+    # restart loop isn't brought back while we remove it.
+    docker update --restart=no "${present[@]}" >/dev/null 2>&1 || true
+
     log "stopping ${present[*]} (up to ${STOP_TIMEOUT}s each)"
-    docker stop -t "$STOP_TIMEOUT" "${present[@]}" >/dev/null || warn "some containers did not stop cleanly"
+    docker stop -t "$STOP_TIMEOUT" "${present[@]}" >/dev/null 2>&1 \
+        || log "some containers were not running or did not stop cleanly; removing anyway"
     for c in "${present[@]}"; do
-        if docker rm -f "$c" >/dev/null; then
-            log "removed container '$c'"
-        else
-            warn "could not remove container '$c'"
-        fi
+        remove_container "$c" && log "removed container '$c'"
     done
 else
     log "no Linkly containers found"
