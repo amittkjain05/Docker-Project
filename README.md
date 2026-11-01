@@ -19,9 +19,9 @@ containers in order and lock down traffic between them with iptables.
  internal              │     │
  172.30.2.0/24      ┌──▼─┐ ┌─▼─────┐
  (no internet)      │ db │ │ redis │
-                    └──▲─┘ └──▲────┘
-                       │      │
-                    ┌──┴──────┴──┐
+                    └── ─┘ └──▲────┘
+                              │
+                    ┌── ──────┴──┐
                     │   worker   │  Redis clicks → Postgres, CSV reports
                     └────────────┘
  admin
