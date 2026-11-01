@@ -27,7 +27,8 @@ DB_IP="172.30.2.10"        # internal
 REDIS_IP="172.30.2.11"     # internal
 API_INT_IP="172.30.2.12"   # internal
 WORKER_IP="172.30.2.13"    # internal
-BACKUP_IP="172.30.2.14"    # internal
+# Backups are not a long-running service: scripts/backup.sh runs a throwaway
+# pg_dump container on the admin network (db is also attached to admin).
 
 # Options shared by every container
 COMMON_OPTS=(
@@ -174,7 +175,7 @@ for vol in reports redisdata pgdata; do
 done
 
 # ---------------------------------------------------------------------------
-# Services (in dependency order: db -> redis -> api -> worker -> proxy -> backup)
+# Services (in dependency order: db -> redis -> api -> worker -> proxy)
 # ---------------------------------------------------------------------------
 run_container db internal --ip "$DB_IP" \
     --tmpfs /var/run/postgresql:rw,noexec,nosuid,size=10m \
@@ -217,13 +218,8 @@ run_container proxy dmz --ip "$PROXY_IP" \
     --health-cmd 'wget -q -O /dev/null http://127.0.0.1:8080/healthz' --health-interval 5s --health-retries 12 \
     "$PROXY_IMAGE"
 
-run_container backup internal --ip "$BACKUP_IP" \
-    "${TMPFS_TMP[@]}" \
-    --mount type=volume,source=pgdata,target=/var/lib/postgresql \
-    "${IMAGE_REPO}:backup-1.0"
-
 # Final check: every service must be up before firewall rules are applied
-for c in db redis api worker proxy backup; do
+for c in db redis api worker proxy; do
     is_container_up "$c" || die "container '$c' is not up"
 done
 
@@ -240,7 +236,6 @@ check_ip api    internal "$API_INT_IP"
 check_ip redis  internal "$REDIS_IP"
 check_ip db     internal "$DB_IP"
 check_ip worker internal "$WORKER_IP"
-check_ip backup internal "$BACKUP_IP"
 
 iptables -F DOCKER-USER
 
@@ -256,9 +251,10 @@ allow "$API_INT_IP" "$REDIS_IP"     # api    -> redis
 allow "$API_INT_IP" "$DB_IP"        # api    -> db
 allow "$WORKER_IP"  "$REDIS_IP"     # worker -> redis
 allow "$WORKER_IP"  "$DB_IP"        # worker -> db (worker.py reads from Postgres)
-allow "$BACKUP_IP"  "$DB_IP"        # backup -> db
+# backup -> db goes over the admin network (only db and the backup job are on it),
+# so it needs no rule here.
 
-# Drop everything else between and within the managed networks
+# Drop everything else between and within the dmz and internal networks
 for src in "$DMZ_CIDR" "$INT_CIDR"; do
     for dst in "$DMZ_CIDR" "$INT_CIDR"; do
         iptables -A DOCKER-USER -s "$src" -d "$dst" -j DROP
