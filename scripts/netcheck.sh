@@ -69,11 +69,8 @@ docker info &>/dev/null || die "can't talk to Docker; run as root (sudo)"
 
 # Every service must be running, or its rows would all fail for the wrong reason.
 missing=()
-# Match exact names: `docker inspect db` alone could match another container
-# whose ID starts with "db".
-running_names=$(docker ps --format '{{.Names}}')
 for c in "${SERVICES[@]}"; do
-    grep -x -- "$c" >/dev/null <<<"$running_names" || missing+=("$c")
+    [[ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" == "true" ]] || missing+=("$c")
 done
 (( ${#missing[@]} == 0 )) || die "not running: ${missing[*]} (start the stack with scripts/up.sh first)"
 docker network inspect admin &>/dev/null || die "network 'admin' not found (start the stack with scripts/up.sh first)"

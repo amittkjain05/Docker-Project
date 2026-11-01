@@ -60,17 +60,9 @@ detail() { DETAILS+=("$*"); echo "           $*"; }
 
 fmt_time() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 
-# True if a container with exactly this name exists. `docker inspect db` alone
-# isn't enough: with no container named "db", Docker treats "db" as the start
-# of a container ID (it's valid hex) and matches an unrelated container.
-container_exists() {
-    docker ps -a --format '{{.Names}}' | grep -x -- "$1" >/dev/null
-}
-
 # "healthy", "running" (no healthcheck), "unhealthy", "starting", "exited", "missing", ...
 service_state() {
     local running health status
-    container_exists "$1" || { echo missing; return; }
     read -r status running health < <(docker container inspect -f \
         '{{.State.Status}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
         "$1" 2>/dev/null) || { echo missing; return; }

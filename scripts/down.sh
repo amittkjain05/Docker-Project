@@ -30,10 +30,7 @@ failed=0
 # Containers: stop gracefully first so Postgres shuts down cleanly, Redis
 # flushes its append-only file and the worker finishes the click it's saving.
 # ---------------------------------------------------------------------------
-# True if a container with exactly this name exists. `docker container inspect db`
-# alone isn't enough: with no container named "db", Docker treats "db" as the
-# start of a container ID (it's valid hex) and matches an unrelated container.
-exists() { docker ps -a --format '{{.Names}}' | grep -x -- "$1" >/dev/null; }
+exists() { docker container inspect "$1" &>/dev/null; }
 
 # Remove a container, retrying a few times: one that is crash-looping can be
 # restarted by Docker in the moment between our stop and rm.
