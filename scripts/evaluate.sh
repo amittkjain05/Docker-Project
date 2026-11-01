@@ -24,6 +24,7 @@ UP_TIME_LIMIT=600                       # seconds (10 minutes)
 CRITERIA=(
     "up_healthy|up.sh brings all services to healthy in <= 10 min (timed run in a new session)"
     "reachability|All reachability matrix cells match (netcheck.sh exits 0)"
+    "dual_homed|Only the api is on both dmz and internal (docker network inspect dmz internal)"
 )
 # Criteria that stop and restart the stack (used for the warning below)
 RESTARTS_STACK=(up_healthy)
@@ -159,6 +160,40 @@ criterion_reachability() {
             detail "netcheck.sh could not run (exit $rc):"
             while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$RUN_DIR/netcheck.log") ;;
     esac
+    return 1
+}
+
+# The api is the only container attached to both dmz and internal, so nothing
+# else can bridge the public-facing network and the data network.
+criterion_dual_homed() {
+    local net members both=() c
+    local -A on_dmz=()
+
+    # Keep the full inspect output as evidence.
+    if ! docker network inspect dmz internal >"$RUN_DIR/network-inspect.json" 2>&1; then
+        detail "docker network inspect dmz internal failed (is the stack up?):"
+        while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$RUN_DIR/network-inspect.json")
+        return 1
+    fi
+
+    for net in dmz internal; do
+        members=$(docker network inspect -f '{{range .Containers}}{{.Name}} {{end}}' "$net")
+        members=$(tr ' ' '\n' <<<"$members" | sed '/^$/d' | sort | tr '\n' ' ')
+        detail "$net: ${members:-(no containers)}"
+        for c in $members; do
+            if [[ "$net" == dmz ]]; then
+                on_dmz[$c]=1
+            elif [[ -n "${on_dmz[$c]:-}" ]]; then
+                both+=("$c")
+            fi
+        done
+    done
+
+    if [[ "${both[*]:-}" == "api" ]]; then
+        detail "on both: api (only)"
+        return 0
+    fi
+    detail "on both: ${both[*]:-(none)} (expected: api only)"
     return 1
 }
 

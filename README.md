@@ -281,6 +281,7 @@ start. Criteria run in the order below.
 |---|---|
 | `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`db`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
 | `reachability` | Runs [`netcheck.sh`](scripts/netcheck.sh) against the running stack. Passes if it exits 0, meaning every cell of the reachability matrix matches. On failure it lists the mismatched cells, or why netcheck couldn't run. Doesn't restart anything, so `evaluate.sh reachability` works on a stack that's already up. |
+| `dual_homed` | Reads the members of `dmz` and `internal` with `docker network inspect dmz internal`. Passes if `api` is the only container on both, so nothing else bridges the public-facing and data networks. Lists each network's containers, and saves the full inspect output as `network-inspect.json`. |
 
 Options:
 - `--list`: show the criteria.
