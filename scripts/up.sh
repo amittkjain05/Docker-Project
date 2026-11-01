@@ -5,17 +5,17 @@ set -euo pipefail
 # Settings (change these in one place)
 # ---------------------------------------------------------------------------
 REPO_URL="https://github.com/amittkjain05/Docker-Project.git"
-REPO_DIR="Docker-Project"
-IMAGE_REPO="https://hub.docker.com/repository/docker/amitjain6/linkly_app"
+REPO_DIR="Docker-Project"   # used only when this script isn't run from inside a clone
+IMAGE_REPO="amitjain6/linkly_app"   # Docker Hub image name (not the web page URL)
 #APP_TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 APP_TAG="67f6b8d"
 SECRETS_DIR="/secrets"
-WAIT_TIMEOUT=60
+WAIT_TIMEOUT=60   # seconds to wait for each container to come up
 #API_IMAGE="${API_IMAGE:-linkly-api:$TAG}"
 #WORKER_IMAGE="${WORKER_IMAGE:-linkly-worker:$TAG}"
 PROXY_IMAGE="nginxinc/nginx-unprivileged:1.27-alpine"
 DB_IMAGE="postgres:16-alpine"
-REDIS_IMAGE="redis:7.4-alpine"   # seconds to wait for each container to come up
+REDIS_IMAGE="redis:7.4-alpine"
 
 # Network subnets and fixed container IPs (firewall rules depend on these)
 DMZ_CIDR="172.30.1.0/24"
@@ -50,9 +50,17 @@ SECRETS_MOUNT=(--mount "type=bind,source=${SECRETS_DIR},target=/run/secrets,read
 log() { echo "[up] $*"; }
 die() { echo "[up] ERROR: $*" >&2; exit 1; }
 
+# The api and worker (UID 10001) and Postgres (after it drops root) read these
+# files, so the folder must be enterable and the files readable by other users.
+perm_has() { (( 8#$(stat -c %a "$1") & $2 )); }
+[[ -d "$SECRETS_DIR" ]] || die "missing $SECRETS_DIR folder"
+perm_has "$SECRETS_DIR" 1 || die "$SECRETS_DIR must be enterable by containers: chmod 755 $SECRETS_DIR"
 for f in DB_PASSWORD POSTGRES_PASSWORD; do
     [[ -f "$SECRETS_DIR/$f" ]] || die "missing $SECRETS_DIR/$f"
+    perm_has "$SECRETS_DIR/$f" 4 || die "$SECRETS_DIR/$f must be readable by containers: chmod 644 $SECRETS_DIR/$f"
 done
+[[ "$(cat "$SECRETS_DIR/DB_PASSWORD")" == "$(cat "$SECRETS_DIR/POSTGRES_PASSWORD")" ]] \
+    || die "$SECRETS_DIR/DB_PASSWORD and POSTGRES_PASSWORD must hold the same password"
 
 
 # True if the container is running and, when it has a healthcheck, healthy.
@@ -64,15 +72,21 @@ is_container_up() {
     [[ "$running" == "true" && ( -z "${health:-}" || "$health" == "healthy" ) ]]
 }
 
-# Wait until a container is up; stop the script if it exits or times out.
+# Wait until a container is up; stop the script if it keeps crashing or times out.
+# With --restart unless-stopped a crashing container is usually "restarting", not
+# "exited", so also stop after a few restarts and show its logs.
 wait_for_container() {
-    local name="$1" timeout="${2:-$WAIT_TIMEOUT}" waited=0
+    local name="$1" timeout="${2:-$WAIT_TIMEOUT}" waited=0 status restarts
     until is_container_up "$name"; do
-        if [[ "$(docker inspect -f '{{.State.Status}}' "$name" 2>/dev/null)" == "exited" ]]; then
-            docker logs --tail 20 "$name" >&2 || true
-            die "container '$name' exited during startup"
+        read -r status restarts < <(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$name" 2>/dev/null) || true
+        if [[ "${status:-}" == "exited" || "${restarts:-0}" -ge 3 ]]; then
+            docker logs --tail 30 "$name" >&2 || true
+            die "container '$name' keeps exiting during startup (status: ${status:-unknown}, restarts: ${restarts:-0})"
         fi
-        (( waited >= timeout )) && die "container '$name' not up after ${timeout}s"
+        if (( waited >= timeout )); then
+            docker logs --tail 30 "$name" >&2 || true
+            die "container '$name' not up after ${timeout}s"
+        fi
         sleep 2; (( waited += 2 ))
     done
     log "container '$name' is up"
@@ -96,7 +110,8 @@ run_container() {
 # Usage: connect_network <network> <name> [fixed ip]
 connect_network() {
     local network="$1" name="$2" ip="${3:-}"
-    if [[ -z "$(docker inspect -f "{{index .NetworkSettings.Networks \"$network\"}}" "$name" 2>/dev/null | grep -v '<no value>')" ]]; then
+    # Same check as get_ip: prints nothing when the container isn't on the network.
+    if [[ -z "$(docker inspect -f "{{with index .NetworkSettings.Networks \"$network\"}}{{.IPAddress}}{{end}}" "$name" 2>/dev/null)" ]]; then
         docker network connect ${ip:+--ip "$ip"} "$network" "$name"
     fi
 }
@@ -147,9 +162,15 @@ allow() {
 # ---------------------------------------------------------------------------
 [[ $EUID -eq 0 ]] || die "run as root (needed for docker install, modprobe and iptables)"
 
-if [[ ! -d "$REPO_DIR" ]]; then
+# Use the clone this script lives in; only clone a fresh copy when the script
+# was copied somewhere on its own.
+SCRIPT_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -d "$SCRIPT_REPO/proxy" ]]; then
+    REPO_DIR="$SCRIPT_REPO"
+elif [[ ! -d "$REPO_DIR" ]]; then
     git clone "$REPO_URL" "$REPO_DIR" || die "failed to clone repository; check your connection"
 fi
+log "using repository at $(cd "$REPO_DIR" && pwd)"
 
 # Proxy config and certificates are bind-mounted, so they must exist (absolute path needed).
 # proxy/certs/ is in .gitignore, so a fresh clone won't have the certificates.
@@ -186,7 +207,7 @@ run_container db internal --ip "$DB_IP" \
     -e POSTGRES_USER=linkly \
     -e POSTGRES_PASSWORD_FILE=/run/secrets/POSTGRES_PASSWORD \
     -e POSTGRES_DB=linkly \
-    --health-cmd 'pg_isready -U linkly -d linkly' --health-interval 5s --health-retries 12 \
+    --health-cmd 'pg_isready -h 127.0.0.1 -U linkly -d linkly' --health-interval 5s --health-retries 12 \
     "$DB_IMAGE"
 connect_network admin db
 
@@ -197,6 +218,7 @@ run_container redis internal --ip "$REDIS_IP" \
     "$REDIS_IMAGE" redis-server --appendonly yes --appendfsync everysec
 
 run_container api internal --ip "$API_INT_IP" \
+    "${TMPFS_TMP[@]}" \
     -e DB_HOST=db -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     "${SECRETS_MOUNT[@]}" \
     "${IMAGE_REPO}:api_app-${APP_TAG}"
@@ -206,6 +228,7 @@ run_container worker internal --ip "$WORKER_IP" --init \
      -e DB_HOST=db -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     "${TMPFS_TMP[@]}" \
     --mount type=volume,source=reports,target=/app/reports \
+    -e REPORT_DIR=/app/reports \
     -e WEBHOOK_URL= \
     "${SECRETS_MOUNT[@]}" \
     "${IMAGE_REPO}:worker-${APP_TAG}"

@@ -74,9 +74,8 @@ You need all of the following on the machine that runs the containers.
 
 ### 1. Clone the repository
 
-`up.sh` looks for a folder called `Docker-Project` in the directory you run it
-from, so clone it with its default name and run the scripts from the **parent**
-folder:
+`up.sh` uses the clone it lives in, so you can run it from any folder. The
+examples below run the scripts from the parent folder of the clone:
 
 ```bash
 mkdir -p ~/linkly && cd ~/linkly
@@ -94,29 +93,23 @@ sudo chmod 644 /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD
 ```
 
 The files must be readable inside the containers, which run as non-root users
-(the API and worker as UID 10001), hence mode `644`. Keep the host itself
-restricted to trusted users.
+(the API and worker as UID 10001), hence mode `644`. `up.sh` checks these
+permissions and that both files hold the same password before starting
+anything. Keep the host itself restricted to trusted users.
 
 ### 3. Build the application images
 
-`up.sh` starts `${IMAGE_REPO}:api_app-${APP_TAG}` and `${IMAGE_REPO}:worker-${APP_TAG}`,
-where `APP_TAG` is the short git commit of the directory you run `up.sh` from,
-or `dev` if that directory isn't a git repository (the usual case when you run
-it from the parent folder).
+`up.sh` starts `${IMAGE_REPO}:api_app-${APP_TAG}` and `${IMAGE_REPO}:worker-${APP_TAG}`.
+Both are set at the top of [`scripts/up.sh`](scripts/up.sh):
+`IMAGE_REPO="amitjain6/linkly_app"` and `APP_TAG="67f6b8d"`, whose images are
+already on Docker Hub, so you can skip this step.
 
-First set `IMAGE_REPO` in [`scripts/up.sh`](scripts/up.sh) to a valid image
-name (see [Known issues](#known-issues)), for example:
-
-```bash
-IMAGE_REPO="amitjain6/linkly_app"
-```
-
-Then build and tag both images:
+To run your own build, build and tag both images, then set `APP_TAG` to your tag:
 
 ```bash
 cd ~/linkly/Docker-Project
-docker build -t amitjain6/linkly_app:api_app-dev api/
-docker build -t amitjain6/linkly_app:worker-dev worker/
+docker build -t amitjain6/linkly_app:api_app-mytag api/
+docker build -t amitjain6/linkly_app:worker-mytag worker/
 ```
 
 To share them, push to Docker Hub with `docker push`.
@@ -259,18 +252,8 @@ docs/incidents/      Incident notes
 
 These are open problems in the current scripts:
 
-- **`IMAGE_REPO` in `up.sh` is a web page URL**
-  (`https://hub.docker.com/repository/...`), which isn't a valid image name.
-  Change it to `amitjain6/linkly_app` before running (step 3).
-- **Worker report path:** the worker image writes reports to `/data/reports`, but
-  `up.sh` mounts the `reports` volume at `/app/reports` on a read-only
-  filesystem, so writing the first report fails and the worker restarts.
-  Workaround: add `-e REPORT_DIR=/app/reports` to the worker in `up.sh`.
-- **API temp directory:** the `api` container is read-only with no `/tmp` tmpfs,
-  which gunicorn needs. Workaround: add `"${TMPFS_TMP[@]}"` to the api in `up.sh`.
-- **Container name `cache`:** `down.sh` and `netcheck.sh` refer to `cache`, but
-  the Redis container is called `redis`. As a result `down.sh` leaves Redis
-  running and `netcheck.sh` stops early.
+- **Container name `cache`:** `netcheck.sh` refers to `cache`, but the Redis
+  container is called `redis`, so `netcheck.sh` stops early.
 - **netcheck expectations:** some rows (worker → api, redis/db → api, etc.)
   expect traffic that the firewall blocks, so they report FAIL.
 - **Worker crash loop on webhook errors:** see
