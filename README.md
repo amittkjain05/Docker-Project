@@ -231,19 +231,21 @@ To take backups on a schedule, add a root cron job, for example daily at 02:00:
 sudo bash Docker-Project/scripts/down.sh
 ```
 
-This removes the containers and networks. The `pgdata`, `redisdata` and
-`reports` volumes are kept. To delete the data too:
+This:
+1. Stops the containers gracefully (up to 20 s each), so Postgres shuts down
+   cleanly and Redis saves its data, then removes them.
+2. Removes the `dmz`, `internal` and `admin` networks. If one is still in use
+   (for example by a running `backup.sh`), it names the container in the way.
+3. Resets the `DOCKER-USER` firewall chain to Docker's default.
+
+The `pgdata`, `redisdata` and `reports` volumes are kept. To delete all data
+(links, clicks and reports) as well:
 
 ```bash
-sudo docker volume rm pgdata redisdata reports
+sudo bash Docker-Project/scripts/down.sh --volumes
 ```
 
-The iptables rules stay in the `DOCKER-USER` chain until the next `up.sh` run
-or a reboot. To clear them by hand:
-
-```bash
-sudo iptables -F DOCKER-USER && sudo iptables -A DOCKER-USER -j RETURN
-```
+The script exits non-zero and prints a warning if any step fails.
 
 ## Repository layout
 
@@ -252,7 +254,7 @@ api/                 Flask API, Dockerfile, healthcheck
 worker/              Click worker, Dockerfile, healthcheck
 proxy/               nginx config, gen-cert.sh, Dockerfile (not used by up.sh)
 scripts/up.sh        Create networks/volumes, start containers, apply firewall
-scripts/down.sh      Remove containers and networks (keeps volumes)
+scripts/down.sh      Stop containers, remove networks, clear firewall (--volumes deletes data)
 scripts/backup.sh    One-off pg_dump to ./backups
 scripts/netcheck.sh  Test the reachability matrix
 scripts/iptable_rules.sh  Re-apply only the firewall rules
@@ -269,24 +271,3 @@ These are open problems in the current scripts:
   expect traffic that the firewall blocks, so they report FAIL.
 - **Worker crash loop on webhook errors:** see
   [`docs/incidents/incident1`](docs/incidents/incident1).
-
-### `down.sh`
-
-- **No clean shutdown:** it uses `docker rm -f`, which kills the containers
-  straight away. Postgres has to recover on the next start, Redis can lose up
-  to the last second of writes, and a click the worker has taken from Redis but
-  not yet saved is lost. Workaround: stop them gracefully first:
-  ```bash
-  sudo docker stop -t 20 proxy worker api redis db
-  ```
-- **Firewall rules are left behind:** the `DOCKER-USER` rules stay until the
-  next `up.sh` run or a reboot. They keep dropping traffic between the
-  `172.30.1.0/24` and `172.30.2.0/24` subnets, which affects any other network
-  that later reuses them. Clear them by hand (see [Stopping](#stopping)).
-- **Always reports success:** every error is hidden and the script always
-  prints "Containers and networks removed". If a network is still in use (for
-  example a running `backup.sh` or `netcheck.sh` container), it isn't removed
-  and `up.sh` reuses it. Check with:
-  ```bash
-  sudo docker ps -a && sudo docker network ls
-  ```
