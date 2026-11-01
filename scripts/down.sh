@@ -1,8 +1,9 @@
-#Cleanup the setup by removing the containers, networks, and volumes created by docker-compose up
-#1. Stop and remove the containers, validate if the containers are stopped and removed successfully, if not then exit the script with an error message
-docker stop db redis worker api proxy
-  
-docker rm db redis worker api proxy
+#!/usr/bin/env bash
+# Remove the Linkly containers and networks. Volumes (data) are kept.
+set -euo pipefail
 
-#.2. Remove the networks
-docker network rm dmz internal admin
+docker rm -f proxy worker api cache db >/dev/null 2>&1 || true
+for net in dmz internal admin; do
+  docker network rm "$net" >/dev/null 2>&1 || true
+done
+echo "Containers and networks removed. Volumes kept: pgdata, redisdata, reports."
