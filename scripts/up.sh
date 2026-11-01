@@ -199,8 +199,13 @@ done
 # ---------------------------------------------------------------------------
 # Services (in dependency order: db -> redis -> api -> worker -> proxy)
 # ---------------------------------------------------------------------------
+# Run Postgres as the postgres user (UID 70) from the start. If the image's
+# entrypoint starts as root, it tries to chmod/chown the data folder before
+# dropping to postgres; with --cap-drop ALL root can't enter the folder once
+# initdb has made it 0700, so every start after the first one fails.
 run_container db internal --ip "$DB_IP" \
-    --tmpfs /var/run/postgresql:rw,noexec,nosuid,size=10m \
+    --user postgres \
+    --tmpfs /var/run/postgresql:rw,noexec,nosuid,size=10m,mode=1777 \
     "${TMPFS_TMP[@]}" \
     --mount type=volume,source=pgdata,target=/var/lib/postgresql/data \
     "${SECRETS_MOUNT[@]}" \
