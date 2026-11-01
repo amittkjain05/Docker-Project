@@ -5,7 +5,7 @@ set -euo pipefail
 # Settings (change these in one place)
 # ---------------------------------------------------------------------------
 REPO_URL="https://github.com/amittkjain05/Docker-Project.git"
-REPO_DIR="yourrepo"
+REPO_DIR="Docker-Project"
 IMAGE_REPO="https://hub.docker.com/repository/docker/amitjain6/linkly_app"
 APP_TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 SECRETS_DIR="/secrets"
