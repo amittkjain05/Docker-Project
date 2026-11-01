@@ -227,8 +227,8 @@ connect_network dmz api "$API_DMZ_IP"
 run_container worker internal --ip "$WORKER_IP" --init \
      -e DB_HOST=db -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     "${TMPFS_TMP[@]}" \
-    --mount type=volume,source=reports,target=/app/reports \
-    -e REPORT_DIR=/app/reports \
+    --mount type=volume,source=reports,target=/data/reports \
+    -e REPORT_DIR=/data/reports \
     -e WEBHOOK_URL= \
     "${SECRETS_MOUNT[@]}" \
     "${IMAGE_REPO}:worker-${APP_TAG}"

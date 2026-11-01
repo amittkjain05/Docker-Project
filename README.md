@@ -186,9 +186,20 @@ proxy's own health check.
 ## Reports
 
 The worker writes `clicks-YYYY-MM-DD.csv` (code, click count) every
-`REPORT_INTERVAL` seconds (default 86400) to the `reports` volume. If
-`WEBHOOK_URL` is set, it also posts a summary there. `up.sh` leaves it empty
-because the worker has no internet access.
+`REPORT_INTERVAL` seconds (default 86400) to the `reports` volume, which is
+mounted at `/data/reports` inside the worker. If `WEBHOOK_URL` is set, it also
+posts a summary there. `up.sh` leaves it empty because the worker has no
+internet access.
+
+To list the reports:
+
+```bash
+sudo docker exec worker ls -l /data/reports
+```
+
+If the worker logs `Permission denied` for `/data/reports`, the `reports`
+volume was created by an older `up.sh` run with root ownership. Remove it with
+`sudo docker rm -f worker && sudo docker volume rm reports` and re-run `up.sh`.
 
 ## Backups
 
@@ -258,3 +269,24 @@ These are open problems in the current scripts:
   expect traffic that the firewall blocks, so they report FAIL.
 - **Worker crash loop on webhook errors:** see
   [`docs/incidents/incident1`](docs/incidents/incident1).
+
+### `down.sh`
+
+- **No clean shutdown:** it uses `docker rm -f`, which kills the containers
+  straight away. Postgres has to recover on the next start, Redis can lose up
+  to the last second of writes, and a click the worker has taken from Redis but
+  not yet saved is lost. Workaround: stop them gracefully first:
+  ```bash
+  sudo docker stop -t 20 proxy worker api redis db
+  ```
+- **Firewall rules are left behind:** the `DOCKER-USER` rules stay until the
+  next `up.sh` run or a reboot. They keep dropping traffic between the
+  `172.30.1.0/24` and `172.30.2.0/24` subnets, which affects any other network
+  that later reuses them. Clear them by hand (see [Stopping](#stopping)).
+- **Always reports success:** every error is hidden and the script always
+  prints "Containers and networks removed". If a network is still in use (for
+  example a running `backup.sh` or `netcheck.sh` container), it isn't removed
+  and `up.sh` reuses it. Check with:
+  ```bash
+  sudo docker ps -a && sudo docker network ls
+  ```
