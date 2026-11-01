@@ -62,10 +62,14 @@ fmt_time() { printf '%dm%02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
 
 # "healthy", "running" (no healthcheck), "unhealthy", "starting", "exited", "missing", ...
 service_state() {
-    local running health status
-    read -r status running health < <(docker container inspect -f \
+    local running health status out
+    # Check docker's exit code, not read's: for a missing container
+    # `docker inspect -f` still prints an empty line before failing.
+    out=$(docker container inspect -f \
         '{{.State.Status}} {{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
         "$1" 2>/dev/null) || { echo missing; return; }
+    read -r status running health <<<"$out"
+    [[ -n "${status:-}" ]] || { echo missing; return; }
     # A crash-looping container is "restarting" but still has Running=true.
     if [[ "$running" != "true" || "$status" != running ]]; then echo "$status"
     elif [[ -n "${health:-}" ]]; then echo "$health"
@@ -399,16 +403,18 @@ criterion_process_user() {
 # Every service: all capabilities dropped, read-only root filesystem, and
 # memory and CPU limits.
 criterion_hardening() {
-    local c capdrop ro mem nano quota problems msg ok=0
+    local c capdrop ro mem nano quota problems msg out ok=0
 
     docker inspect "${SERVICES[@]}" >"$RUN_DIR/hardening-inspect.json" 2>&1
     for c in "${SERVICES[@]}"; do
-        if ! IFS='|' read -r capdrop ro mem nano quota < <(docker inspect -f \
+        # Check docker's exit code: a missing container still prints an empty line.
+        if ! out=$(docker container inspect -f \
             '{{join .HostConfig.CapDrop ","}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuQuota}}' \
             "$c" 2>/dev/null); then
             detail "$c: not found"
             ok=1; continue
         fi
+        IFS='|' read -r capdrop ro mem nano quota <<<"$out"
         problems=()
         [[ ",${capdrop^^}," == *",ALL,"* ]] || problems+=("CapDrop is [${capdrop:-none}], not ALL")
         [[ "$ro" == true ]]                 || problems+=("ReadonlyRootfs is $ro")
