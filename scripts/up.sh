@@ -7,7 +7,8 @@ set -euo pipefail
 REPO_URL="https://github.com/amittkjain05/Docker-Project.git"
 REPO_DIR="Docker-Project"
 IMAGE_REPO="https://hub.docker.com/repository/docker/amitjain6/linkly_app"
-APP_TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+#APP_TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
+APP_TAG="67f6b8d"
 SECRETS_DIR="/secrets"
 WAIT_TIMEOUT=60
 #API_IMAGE="${API_IMAGE:-linkly-api:$TAG}"
