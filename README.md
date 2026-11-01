@@ -33,7 +33,7 @@ containers in order and lock down traffic between them with iptables.
 |---|---|---|---|
 | `proxy` | `nginxinc/nginx-unprivileged:1.27-alpine` | dmz | Redirects HTTP to HTTPS and forwards requests to the API |
 | `api` | built from [`api/`](api/) | dmz, internal | Creates short links, redirects, serves click stats |
-| `db` | `postgres:16-alpine` | internal, admin | Stores links and clicks (volume `pgdata`) |
+| `db` | `postgres:16-alpine` | internal, admin | Stores links and clicks (volume `pgdata`). Runs as the `postgres` user from the start, so it restarts cleanly on an existing volume |
 | `redis` | `redis:7.4-alpine` | internal | Link cache and click queue (volume `redisdata`) |
 | `worker` | built from [`worker/`](worker/) | internal | Moves clicks from Redis to Postgres, writes CSV reports (volume `reports`) |
 | backup job | `postgres:16-alpine` | admin | Throwaway `pg_dump` container started by `scripts/backup.sh` |
