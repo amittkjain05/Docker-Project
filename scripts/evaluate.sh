@@ -25,6 +25,7 @@ CRITERIA=(
     "up_healthy|up.sh brings all services to healthy in <= 10 min (timed run in a new session)"
     "reachability|All reachability matrix cells match (netcheck.sh exits 0)"
     "dual_homed|Only the api is on both dmz and internal (docker network inspect dmz internal)"
+    "published_ports|Only the proxy publishes ports (docker ps --format '{{.Names}} {{.Ports}}')"
 )
 # Criteria that stop and restart the stack (used for the warning below)
 RESTARTS_STACK=(up_healthy)
@@ -197,6 +198,42 @@ criterion_dual_homed() {
     return 1
 }
 
+# The proxy is the only container with ports published on the host. Docker
+# shows a published port as "0.0.0.0:443->8443/tcp"; a port that is only
+# exposed inside the network shows as "5000/tcp" and doesn't count.
+criterion_published_ports() {
+    local name ports publishers=() proxy_ports=""
+
+    # Keep the raw output as evidence.
+    if ! docker ps --format '{{.Names}} {{.Ports}}' >"$RUN_DIR/docker-ps.txt" 2>&1; then
+        detail "docker ps failed:"
+        while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$RUN_DIR/docker-ps.txt")
+        return 1
+    fi
+
+    while read -r name ports; do
+        [[ -n "$name" ]] || continue
+        if [[ "$ports" == *"->"* ]]; then
+            publishers+=("$name")
+            detail "$name: $ports"
+            [[ "$name" == proxy ]] && proxy_ports="$ports"
+        else
+            detail "$name: ${ports:-(no ports)} (not published)"
+        fi
+    done <"$RUN_DIR/docker-ps.txt"
+
+    if [[ -z "$proxy_ports" ]]; then
+        detail "proxy publishes no ports (is it running?)"
+        return 1
+    fi
+    if [[ "${publishers[*]}" != "proxy" ]]; then
+        detail "publishing ports: ${publishers[*]} (expected: proxy only)"
+        return 1
+    fi
+    detail "publishing ports: proxy (only)"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -205,7 +242,7 @@ selected=()
 for arg in "$@"; do
     case "$arg" in
         --cold) COLD=1 ;;
-        --list) for c in "${CRITERIA[@]}"; do printf '%-14s %s\n' "${c%%|*}" "${c#*|}"; done; exit 0 ;;
+        --list) for c in "${CRITERIA[@]}"; do printf '%-16s %s\n' "${c%%|*}" "${c#*|}"; done; exit 0 ;;
         -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         -*) die "unknown option '$arg' (see --help)" ;;
         *) selected+=("$arg") ;;
@@ -253,7 +290,7 @@ echo
 echo "================ Evaluation summary ================"
 for r in "${results[@]}"; do
     IFS='|' read -r res id desc <<<"$r"
-    printf '%-5s %-14s %s\n' "$res" "$id" "$desc"
+    printf '%-5s %-16s %s\n' "$res" "$id" "$desc"
 done
 echo "===================================================="
 echo "Logs and summary: $RUN_DIR"
