@@ -23,7 +23,10 @@ UP_TIME_LIMIT=600                       # seconds (10 minutes)
 # id|description, in the order they run
 CRITERIA=(
     "up_healthy|up.sh brings all services to healthy in <= 10 min (timed run in a new session)"
+    "reachability|All reachability matrix cells match (netcheck.sh exits 0)"
 )
+# Criteria that stop and restart the stack (used for the warning below)
+RESTARTS_STACK=(up_healthy)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -131,6 +134,34 @@ criterion_up_healthy() {
     return "$ok"
 }
 
+# Every cell of the reachability matrix matches: netcheck.sh exits 0.
+# Uses the running stack, so run it after up_healthy (or on a stack you started).
+criterion_reachability() {
+    local rc total passed
+
+    log "running netcheck.sh; output in netcheck.log"
+    ( cd "$REPO_DIR" && "${NEW_SESSION[@]}" "$SCRIPTS/netcheck.sh" ) >"$RUN_DIR/netcheck.log" 2>&1
+    rc=$?
+
+    total=$(grep -cE ' (PASS|FAIL) \(' "$RUN_DIR/netcheck.log")
+    passed=$(grep -cE ' PASS \(' "$RUN_DIR/netcheck.log")
+
+    case "$rc" in
+        0)
+            detail "netcheck.sh exited 0: $passed/$total cells match"
+            return 0 ;;
+        1)
+            detail "netcheck.sh exited 1: $passed/$total cells match; mismatches:"
+            while IFS= read -r line; do detail "  $line"; done \
+                < <(grep -E ' FAIL \(' "$RUN_DIR/netcheck.log") ;;
+        *)
+            # Exit 2 means netcheck couldn't start (a service down, Docker unreachable, ...)
+            detail "netcheck.sh could not run (exit $rc):"
+            while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$RUN_DIR/netcheck.log") ;;
+    esac
+    return 1
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -161,8 +192,13 @@ for s in "${selected[@]}"; do
     printf '%s\n' "${CRITERIA[@]}" | grep -q "^$s|" || die "unknown criterion '$s' (see --list)"
 done
 
-echo "[evaluate] WARNING: this stops and restarts the Linkly stack."
-(( COLD )) && echo "[evaluate] WARNING: --cold deletes the pgdata, redisdata and reports volumes."
+for c in "${to_run[@]}"; do
+    if [[ " ${RESTARTS_STACK[*]} " == *" ${c%%|*} "* ]]; then
+        echo "[evaluate] WARNING: this stops and restarts the Linkly stack."
+        (( COLD )) && echo "[evaluate] WARNING: --cold deletes the pgdata, redisdata and reports volumes."
+        break
+    fi
+done
 mkdir -p "$RUN_DIR"
 
 results=()

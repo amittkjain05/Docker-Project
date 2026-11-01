@@ -274,11 +274,13 @@ This checks the project against a list of criteria and prints a PASS/FAIL
 summary. It exits non-zero if any criterion fails. Each run saves its logs and
 a `summary.txt` in `logs/evaluate-<timestamp>/`.
 
-**This restarts the stack**, because the timed check needs a clean start.
+**A full run restarts the stack**, because the timed check needs a clean
+start. Criteria run in the order below.
 
 | Criterion | What it checks |
 |---|---|
 | `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`db`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
+| `reachability` | Runs [`netcheck.sh`](scripts/netcheck.sh) against the running stack. Passes if it exits 0, meaning every cell of the reachability matrix matches. On failure it lists the mismatched cells, or why netcheck couldn't run. Doesn't restart anything, so `evaluate.sh reachability` works on a stack that's already up. |
 
 Options:
 - `--list`: show the criteria.
