@@ -292,6 +292,7 @@ does what that criterion needs.
 | `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `/secrets` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
 | `durability` | Counts the rows in `links`, runs `down.sh` and `up.sh` (in new sessions), then counts again. Passes if the count is unchanged and the test link still exists. Creates a test link first if needed. |
 | `backup` | Runs [`backup.sh`](scripts/backup.sh), then checks that a new `.sql.gz` appeared in `backups/`, that it's a valid gzip file, and that `zcat` of it contains the test link's code as a `links` row. Creates a test link first if needed. |
+| `vulnerabilities` | Runs `trivy image --severity CRITICAL --ignore-unfixed --exit-code 1` on the `api` and `worker` images (the ones built from this repo). Passes if Trivy exits 0 for both, meaning no CRITICAL vulnerability that has a fix available. On failure it shows the count and the first few CVE/GHSA IDs; full reports are saved as `trivy-<container>.txt`. Uses an installed `trivy`, or else runs the `aquasec/trivy` image with the Docker socket mounted. The first run downloads Trivy's vulnerability database, so it needs internet access. |
 
 Options:
 - `--list`: show the criteria.

@@ -23,6 +23,10 @@ BASE_URL="https://localhost"            # the proxy, as a user would reach it
 API_IMAGE_LIMIT_MB=200                  # 1 MB = 1,000,000 bytes, as docker reports sizes
 CLICK_WAIT=30                           # seconds to wait for the worker to count a click
 SECRETS_DIR="/secrets"                  # same as up.sh
+SCAN_CONTAINERS=(api worker)            # images built from this repo, scanned by Trivy
+TRIVY_FLAGS=(--severity CRITICAL --ignore-unfixed --exit-code 1)
+TRIVY_DOCKER_IMAGE="aquasec/trivy:0.56.2"   # used only when trivy isn't installed
+TRIVY_TIMEOUT=900                       # seconds per image (first run downloads the vuln DB)
 
 # id|description, in the order they run
 CRITERIA=(
@@ -37,6 +41,7 @@ CRITERIA=(
     "secret_exposure|DB password not in any container's Config.Env (docker inspect)"
     "durability|Same link count after down.sh and up.sh (count before and after)"
     "backup|backup.sh writes a .sql.gz containing your links (zcat the file and grep a code)"
+    "vulnerabilities|0 fixable CRITICAL vulns in api and worker images (trivy ${TRIVY_FLAGS[*]})"
 )
 # Criteria that stop and restart the stack (used for the warning below)
 RESTARTS_STACK=(up_healthy durability)
@@ -499,6 +504,67 @@ criterion_backup() {
     fi
     detail "zcat | grep: link $EVAL_CODE not found in the dump"
     return 1
+}
+
+# Image a container runs, or the image up.sh would start for it when it isn't running.
+image_of() { # container tag-prefix
+    local image repo tag
+    image=$(docker inspect -f '{{.Config.Image}}' "$1" 2>/dev/null)
+    if [[ -z "$image" ]]; then
+        repo=$(sed -n 's/^IMAGE_REPO="\([^"]*\)".*/\1/p' "$SCRIPTS/up.sh")
+        tag=$(sed -n 's/^APP_TAG="\([^"]*\)".*/\1/p' "$SCRIPTS/up.sh")
+        image="$repo:$2-$tag"
+    fi
+    echo "$image"
+}
+
+# Trivy finds no CRITICAL vulnerability that has a fix available in the
+# project's images: `trivy image --severity CRITICAL --ignore-unfixed --exit-code 1`
+# exits 0 for each. Uses an installed trivy, or the official Trivy image.
+criterion_vulnerabilities() {
+    local trivy=() c prefix image report rc ok=0 count ids list
+
+    if command -v trivy &>/dev/null; then
+        trivy=(trivy)
+        detail "using installed trivy ($(trivy --version 2>/dev/null | head -n 1))"
+    else
+        # Trivy reads local images through the Docker socket; the cache volume
+        # keeps the vulnerability database between runs.
+        trivy=(docker run --rm -v /var/run/docker.sock:/var/run/docker.sock
+               -v trivy-cache:/root/.cache "$TRIVY_DOCKER_IMAGE")
+        detail "trivy not installed; using $TRIVY_DOCKER_IMAGE"
+    fi
+
+    for c in "${SCAN_CONTAINERS[@]}"; do
+        case "$c" in api) prefix=api_app ;; *) prefix="$c" ;; esac
+        image=$(image_of "$c" "$prefix")
+        report="$RUN_DIR/trivy-$c.txt"
+        log "scanning $image with trivy; output in ${report##*/}"
+
+        timeout "$TRIVY_TIMEOUT" "${trivy[@]}" image "${TRIVY_FLAGS[@]}" --no-progress "$image" >"$report" 2>&1
+        rc=$?
+
+        # Trivy also exits 1 on errors, so tell findings apart by the report's "Total:" line.
+        if (( rc == 0 )); then
+            detail "$c ($image): 0 fixable CRITICAL"
+        elif (( rc == 1 )) && grep -q 'CRITICAL: [1-9]' "$report"; then
+            # Sum "CRITICAL: N" over every target in the report (OS packages, Python packages, ...).
+            count=$(grep -oE 'CRITICAL: [0-9]+' "$report" | awk '{s += $2} END {print s + 0}')
+            ids=$(grep -oE '(CVE-[0-9]{4}-[0-9]+|GHSA(-[a-z0-9]{4}){3})' "$report" | sort -u)
+            list=$(head -n 5 <<<"$ids" | paste -sd ' ')
+            (( $(grep -c . <<<"$ids") > 5 )) && list+=" ..."
+            detail "$c ($image): $count fixable CRITICAL: ${list:-see ${report##*/}}"
+            ok=1
+        elif (( rc == 124 )); then
+            detail "$c ($image): trivy timed out after $(fmt_time "$TRIVY_TIMEOUT")"
+            ok=1
+        else
+            detail "$c ($image): trivy failed (exit $rc); last lines:"
+            while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$report")
+            ok=1
+        fi
+    done
+    return "$ok"
 }
 
 # ---------------------------------------------------------------------------
