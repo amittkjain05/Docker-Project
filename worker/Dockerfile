@@ -1,6 +1,7 @@
 FROM python:3.12-slim-bookworm
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV PATH=/opt/venv/bin:$PATH \ 
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     DB_HOST=db \
     DB_NAME=linkly \
@@ -8,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     DB_PASSWORD="" \
     DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     REDIS_HOST=redis \
-    REPORT_DIR=reports \
+    REPORT_DIR=/data/reports \
     REPORT_INTERVAL=86400 \
     WEBHOOK_URL= \
     HEARTBEAT_FILE=/tmp/worker-heartbeat 
@@ -18,9 +19,9 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && useradd --create-home --shell /usr/sbin/nologin worker \
+    && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin worker \
     && mkdir -p "$REPORT_DIR" \
-    && chown worker:worker "$REPORT_DIR"
+    && chown 10001:10001 "$REPORT_DIR"
 
 COPY worker.py healthcheck.py ./
 
