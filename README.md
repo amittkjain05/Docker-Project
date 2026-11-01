@@ -17,15 +17,15 @@ containers in order and lock down traffic between them with iptables.
                     │    api    │  Flask + gunicorn (on dmz and internal)
                     └──┬─────┬──┘
  internal              │     │
- 172.30.2.0/24      ┌──▼─┐ ┌─▼─────┐
- (no internet)      │ db │ │ redis │
-                    └── ─┘ └──▲────┘
-                              │
-                    ┌── ──────┴──┐
-                    │   worker   │  Redis clicks → Postgres, CSV reports
-                    └────────────┘
+ 172.30.2.0/24   ┌─────▼─┐ ┌─▼─────┐
+ (no internet)   │ pgsql │ │ redis │
+                 └───────┘ └───▲───┘
+                               │
+                 ┌─────────────┴───┐
+                 │     worker      │  Redis clicks → Postgres, CSV reports
+                 └─────────────────┘
  admin
- 172.30.3.0/24      backup job (one-off pg_dump) ──► db   (db is also on admin)
+ 172.30.3.0/24      backup job (one-off pg_dump) ──► pgsql   (pgsql is also on admin)
  (no internet)
 ```
 
@@ -33,7 +33,7 @@ containers in order and lock down traffic between them with iptables.
 |---|---|---|---|
 | `proxy` | `nginxinc/nginx-unprivileged:1.27-alpine` | dmz | Redirects HTTP to HTTPS and forwards requests to the API |
 | `api` | built from [`api/`](api/) | dmz, internal | Creates short links, redirects, serves click stats |
-| `db` | `postgres:16-alpine` | internal, admin | Stores links and clicks (volume `pgdata`). Runs as the `postgres` user from the start, so it restarts cleanly on an existing volume |
+| `pgsql` | `postgres:16-alpine` | internal, admin | Stores links and clicks (volume `pgdata`). Runs as the `postgres` user from the start, so it restarts cleanly on an existing volume |
 | `redis` | `redis:7.4-alpine` | internal | Link cache and click queue (volume `redisdata`) |
 | `worker` | built from [`worker/`](worker/) | internal | Moves clicks from Redis to Postgres, writes CSV reports (volume `reports`) |
 | backup job | `postgres:16-alpine` | admin | Throwaway `pg_dump` container started by `scripts/backup.sh` |
@@ -134,7 +134,7 @@ The script:
 1. Checks the secrets, the proxy config and the certificates.
 2. Creates the `dmz`, `internal` (no internet) and `admin` (no internet) networks
    and the `pgdata`, `redisdata` and `reports` volumes.
-3. Starts `db → redis → api → worker → proxy` with fixed IPs, waiting for each to
+3. Starts `pgsql → redis → api → worker → proxy` with fixed IPs, waiting for each to
    be healthy before the next.
 4. Applies the firewall rules in the `DOCKER-USER` iptables chain.
 
@@ -153,13 +153,13 @@ if any row differs from the expected result.
 
 Expected results, matching the firewall `up.sh` applies:
 
-| From → To | api :5000 | db :5432 | redis :6379 | internet (1.1.1.1:443) |
+| From → To | api :5000 | pgsql :5432 | redis :6379 | internet (1.1.1.1:443) |
 |---|---|---|---|---|
 | proxy | allowed | blocked | blocked | allowed |
 | api | — | allowed | allowed | allowed |
 | worker | blocked | allowed | allowed | blocked |
 | redis | blocked | blocked | — | blocked |
-| db | blocked | — | blocked | blocked |
+| pgsql | blocked | — | blocked | blocked |
 | backup | blocked | allowed | blocked | blocked |
 
 The last column on each row shows why it got that result: `open`, `timeout`
@@ -225,7 +225,7 @@ sudo bash Docker-Project/scripts/backup.sh
 ```
 
 This starts a throwaway `postgres:16-alpine` container on the `admin` network
-only, runs `pg_dump` against `db` and writes
+only, runs `pg_dump` against `pgsql` and writes
 `backups/linkly-<UTC timestamp>.sql.gz` at the repo root. The container is
 removed when it finishes. Set `SECRETS_DIR` if your secrets aren't in `/secrets`.
 
@@ -233,7 +233,7 @@ To restore a dump into the running database:
 
 ```bash
 gunzip -c Docker-Project/backups/linkly-20261101T120000Z.sql.gz \
-  | sudo docker exec -i db psql -U linkly -d linkly
+  | sudo docker exec -i pgsql psql -U linkly -d linkly
 ```
 
 To take backups on a schedule, add a root cron job, for example daily at 02:00:
@@ -281,7 +281,7 @@ does what that criterion needs.
 
 | Criterion | What it checks |
 |---|---|
-| `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`db`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
+| `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`pgsql`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
 | `reachability` | Runs [`netcheck.sh`](scripts/netcheck.sh) against the running stack. Passes if it exits 0, meaning every cell of the reachability matrix matches. On failure it lists the mismatched cells, or why netcheck couldn't run. Doesn't restart anything, so `evaluate.sh reachability` works on a stack that's already up. |
 | `dual_homed` | Reads the members of `dmz` and `internal` with `docker network inspect dmz internal`. Passes if `api` is the only container on both, so nothing else bridges the public-facing and data networks. Lists each network's containers, and saves the full inspect output as `network-inspect.json`. |
 | `published_ports` | Reads `docker ps --format '{{.Names}} {{.Ports}}'`. Passes if `proxy` is the only running container publishing ports on the host (shown as `host:port->container/tcp`). Ports that are only exposed inside the network, like the api's `5000/tcp`, don't count. Lists every container's ports and saves the output as `docker-ps.txt`. Any running container counts, including ones outside this project. |

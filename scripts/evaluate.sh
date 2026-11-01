@@ -17,7 +17,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPTS="$REPO_DIR/scripts"
 RUN_DIR="$REPO_DIR/logs/evaluate-$(date -u +%Y%m%dT%H%M%SZ)"
 
-SERVICES=(db redis api worker proxy)    # long-running containers started by up.sh
+SERVICES=(pgsql redis api worker proxy)    # long-running containers started by up.sh
 UP_TIME_LIMIT=600                       # seconds (10 minutes)
 BASE_URL="https://localhost"            # the proxy, as a user would reach it
 API_IMAGE_LIMIT_MB=200                  # 1 MB = 1,000,000 bytes, as docker reports sizes
@@ -84,9 +84,9 @@ NEW_SESSION=(
     bash --noprofile --norc
 )
 
-# Run a SQL query in the db container (local socket, no password needed).
+# Run a SQL query in the pgsql container (local socket, no password needed).
 db_query() {
-    docker exec db psql -U linkly -d linkly -tAc "$1" 2>>"$RUN_DIR/db_query.log"
+    docker exec pgsql psql -U linkly -d linkly -tAc "$1" 2>>"$RUN_DIR/db_query.log"
 }
 
 # curl through the proxy; -k because the certificate is self-signed.
@@ -471,7 +471,7 @@ criterion_durability() {
 
     ensure_link || return 1
     before=$(db_query 'SELECT count(*) FROM links')
-    [[ "$before" =~ ^[0-9]+$ ]] || { detail "could not count links before (is db up?)"; return 1; }
+    [[ "$before" =~ ^[0-9]+$ ]] || { detail "could not count links before (is pgsql up?)"; return 1; }
     detail "links before: $before"
 
     log "restarting the stack with down.sh and up.sh"

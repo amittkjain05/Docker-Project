@@ -6,7 +6,7 @@ set -euo pipefail
 
 BACKUP_IMAGE="postgres:16-alpine"
 NETWORK="admin"
-DB_HOST="db"
+DB_HOST="pgsql"
 DB_NAME="linkly"
 DB_USER="linkly"
 SECRETS_DIR="${SECRETS_DIR:-/secrets}"
@@ -17,7 +17,7 @@ die() { echo "[backup] ERROR: $*" >&2; exit 1; }
 
 [[ -f "$SECRETS_DIR/DB_PASSWORD" ]] || die "missing $SECRETS_DIR/DB_PASSWORD"
 
-# The db container must be running and attached to the admin network.
+# The pgsql container must be running and attached to the admin network.
 [[ "$(docker inspect -f '{{.State.Running}}' "$DB_HOST" 2>/dev/null)" == "true" ]] \
     || die "container '$DB_HOST' is not running; start the stack with scripts/up.sh first"
 [[ -n "$(docker inspect -f "{{with index .NetworkSettings.Networks \"$NETWORK\"}}{{.IPAddress}}{{end}}" "$DB_HOST")" ]] \

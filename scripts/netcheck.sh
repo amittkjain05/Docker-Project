@@ -9,7 +9,7 @@
 set -euo pipefail
 
 PROBE_IMAGE="python:3.12-slim-bookworm"
-SERVICES=(proxy api worker redis db)
+SERVICES=(proxy api worker redis pgsql)
 
 # Prints one word: "open", "no-dns" (name doesn't resolve on this network),
 # "timeout" (packets dropped), "refused", "unreachable" (no route), or the error name.
@@ -31,33 +31,33 @@ except OSError as e:
 '
 
 # What up.sh sets up:
-# - proxy is on dmz; api is on dmz and internal; worker, redis and db are on
-#   internal (no internet); db is also on admin (no internet).
-# - The firewall only allows proxy->api, api->redis, api->db, worker->redis and
-#   worker->db between dmz and internal. Everything else between them is dropped.
+# - proxy is on dmz; api is on dmz and internal; worker, redis and pgsql are on
+#   internal (no internet); pgsql is also on admin (no internet).
+# - The firewall only allows proxy->api, api->redis, api->pgsql, worker->redis and
+#   worker->pgsql between dmz and internal. Everything else between them is dropped.
 # - The backup job (backup.sh) is a throwaway container on admin only.
 #
 # source  target   port  expected
 MATRIX="
 proxy   api      5000  allowed
-proxy   db       5432  blocked
+proxy   pgsql    5432  blocked
 proxy   redis    6379  blocked
 proxy   1.1.1.1  443   allowed
-api     db       5432  allowed
+api     pgsql    5432  allowed
 api     redis    6379  allowed
 api     1.1.1.1  443   allowed
 worker  api      5000  blocked
-worker  db       5432  allowed
+worker  pgsql    5432  allowed
 worker  redis    6379  allowed
 worker  1.1.1.1  443   blocked
 redis   api      5000  blocked
-redis   db       5432  blocked
+redis   pgsql    5432  blocked
 redis   1.1.1.1  443   blocked
-db      api      5000  blocked
-db      redis    6379  blocked
-db      1.1.1.1  443   blocked
+pgsql   api      5000  blocked
+pgsql   redis    6379  blocked
+pgsql   1.1.1.1  443   blocked
 backup  api      5000  blocked
-backup  db       5432  allowed
+backup  pgsql    5432  allowed
 backup  redis    6379  blocked
 backup  1.1.1.1  443   blocked
 "

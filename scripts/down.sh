@@ -5,7 +5,7 @@
 # Usage: sudo scripts/down.sh [--volumes]
 set -euo pipefail
 
-CONTAINERS=(proxy worker api redis db)   # front to back, so nothing gets new work mid-stop
+CONTAINERS=(proxy worker api redis pgsql)   # front to back, so nothing gets new work mid-stop
 NETWORKS=(dmz internal admin)
 VOLUMES=(pgdata redisdata reports)
 STOP_TIMEOUT=20                          # seconds each container gets to shut down cleanly

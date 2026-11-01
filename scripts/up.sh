@@ -29,7 +29,7 @@ REDIS_IP="172.30.2.11"     # internal
 API_INT_IP="172.30.2.12"   # internal
 WORKER_IP="172.30.2.13"    # internal
 # Backups are not a long-running service: scripts/backup.sh runs a throwaway
-# pg_dump container on the admin network (db is also attached to admin).
+# pg_dump container on the admin network (pgsql is also attached to admin).
 
 # Options shared by every container
 COMMON_OPTS=(
@@ -197,13 +197,13 @@ for vol in reports redisdata pgdata; do
 done
 
 # ---------------------------------------------------------------------------
-# Services (in dependency order: db -> redis -> api -> worker -> proxy)
+# Services (in dependency order: pgsql -> redis -> api -> worker -> proxy)
 # ---------------------------------------------------------------------------
 # Run Postgres as the postgres user (UID 70) from the start. If the image's
 # entrypoint starts as root, it tries to chmod/chown the data folder before
 # dropping to postgres; with --cap-drop ALL root can't enter the folder once
 # initdb has made it 0700, so every start after the first one fails.
-run_container db internal --ip "$DB_IP" \
+run_container pgsql internal --ip "$DB_IP" \
     --user postgres \
     --tmpfs /var/run/postgresql:rw,noexec,nosuid,size=10m,mode=1777 \
     "${TMPFS_TMP[@]}" \
@@ -214,7 +214,7 @@ run_container db internal --ip "$DB_IP" \
     -e POSTGRES_DB=linkly \
     --health-cmd 'pg_isready -h 127.0.0.1 -U linkly -d linkly' --health-interval 5s --health-retries 12 \
     "$DB_IMAGE"
-connect_network admin db
+connect_network admin pgsql
 
 run_container redis internal --ip "$REDIS_IP" \
     --mount type=volume,source=redisdata,target=/data \
@@ -224,13 +224,13 @@ run_container redis internal --ip "$REDIS_IP" \
 
 run_container api internal --ip "$API_INT_IP" \
     "${TMPFS_TMP[@]}" \
-    -e DB_HOST=db -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
+    -e DB_HOST=pgsql -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     "${SECRETS_MOUNT[@]}" \
     "${IMAGE_REPO}:api_app-${APP_TAG}"
 connect_network dmz api "$API_DMZ_IP"
 
 run_container worker internal --ip "$WORKER_IP" --init \
-     -e DB_HOST=db -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
+     -e DB_HOST=pgsql -e REDIS_HOST=redis -e DB_PASSWORD_FILE=/run/secrets/DB_PASSWORD \
     "${TMPFS_TMP[@]}" \
     --mount type=volume,source=reports,target=/data/reports \
     -e REPORT_DIR=/data/reports \
@@ -248,7 +248,7 @@ run_container proxy dmz --ip "$PROXY_IP" \
     "$PROXY_IMAGE"
 
 # Final check: every service must be up before firewall rules are applied
-for c in db redis api worker proxy; do
+for c in pgsql redis api worker proxy; do
     is_container_up "$c" || die "container '$c' is not up"
 done
 
@@ -263,7 +263,7 @@ check_ip proxy  dmz      "$PROXY_IP"
 check_ip api    dmz      "$API_DMZ_IP"
 check_ip api    internal "$API_INT_IP"
 check_ip redis  internal "$REDIS_IP"
-check_ip db     internal "$DB_IP"
+check_ip pgsql  internal "$DB_IP"
 check_ip worker internal "$WORKER_IP"
 
 iptables -F DOCKER-USER
@@ -277,10 +277,10 @@ done
 # Allowed service-to-service traffic
 allow "$PROXY_IP"   "$API_DMZ_IP"   # proxy  -> api
 allow "$API_INT_IP" "$REDIS_IP"     # api    -> redis
-allow "$API_INT_IP" "$DB_IP"        # api    -> db
+allow "$API_INT_IP" "$DB_IP"        # api    -> pgsql
 allow "$WORKER_IP"  "$REDIS_IP"     # worker -> redis
-allow "$WORKER_IP"  "$DB_IP"        # worker -> db (worker.py reads from Postgres)
-# backup -> db goes over the admin network (only db and the backup job are on it),
+allow "$WORKER_IP"  "$DB_IP"        # worker -> pgsql (worker.py reads from Postgres)
+# backup -> pgsql goes over the admin network (only pgsql and the backup job are on it),
 # so it needs no rule here.
 
 # Drop everything else between and within the dmz and internal networks
