@@ -147,8 +147,25 @@ sudo bash Docker-Project/scripts/netcheck.sh
 ```
 
 It probes each source → target pair from inside the containers' network
-namespaces and prints PASS/FAIL per row. It exits non-zero if any row differs
-from the expected result.
+namespaces and prints PASS/FAIL per row. The backup rows use a throwaway
+container on the `admin` network, like `backup.sh`. The script exits non-zero
+if any row differs from the expected result.
+
+Expected results, matching the firewall `up.sh` applies:
+
+| From → To | api :5000 | db :5432 | redis :6379 | internet (1.1.1.1:443) |
+|---|---|---|---|---|
+| proxy | allowed | blocked | blocked | allowed |
+| api | — | allowed | allowed | allowed |
+| worker | blocked | allowed | allowed | blocked |
+| redis | blocked | blocked | — | blocked |
+| db | blocked | — | blocked | blocked |
+| backup | blocked | allowed | blocked | blocked |
+
+The last column on each row shows why it got that result: `open`, `timeout`
+(dropped by the firewall), `no-dns` (not on the same network), `unreachable`
+(no internet route) or `refused`. If a service isn't running, the script stops
+before probing.
 
 ## Using the API
 
@@ -265,9 +282,5 @@ docs/incidents/      Incident notes
 
 These are open problems in the current scripts:
 
-- **Container name `cache`:** `netcheck.sh` refers to `cache`, but the Redis
-  container is called `redis`, so `netcheck.sh` stops early.
-- **netcheck expectations:** some rows (worker → api, redis/db → api, etc.)
-  expect traffic that the firewall blocks, so they report FAIL.
 - **Worker crash loop on webhook errors:** see
   [`docs/incidents/incident1`](docs/incidents/incident1).
