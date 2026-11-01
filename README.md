@@ -264,6 +264,32 @@ sudo bash Docker-Project/scripts/down.sh --volumes
 
 The script exits non-zero and prints a warning if any step fails.
 
+## Evaluation
+
+```bash
+sudo bash Docker-Project/scripts/evaluate.sh
+```
+
+This checks the project against a list of criteria and prints a PASS/FAIL
+summary. It exits non-zero if any criterion fails. Each run saves its logs and
+a `summary.txt` in `logs/evaluate-<timestamp>/`.
+
+**This restarts the stack**, because the timed check needs a clean start.
+
+| Criterion | What it checks |
+|---|---|
+| `up_healthy` | Runs `down.sh`, then times `up.sh` in a new shell session (no inherited environment). Passes if `up.sh` succeeds within 10 minutes, all five services (`db`, `redis`, `api`, `worker`, `proxy`) report `healthy`, and `https://localhost/health` returns 200. |
+
+Options:
+- `--list`: show the criteria.
+- `<criterion-id> ...`: run only those criteria, for example `evaluate.sh up_healthy`.
+- `--cold`: also delete the data volumes and the cached app images first, to
+  time a first-ever deployment, including image pulls. **This deletes all data.**
+
+To add a criterion, write a `criterion_<id>` function in
+[`scripts/evaluate.sh`](scripts/evaluate.sh) that returns 0 for PASS and 1 for
+FAIL, and add `"<id>|<description>"` to the `CRITERIA` list.
+
 ## Repository layout
 
 ```
@@ -274,6 +300,7 @@ scripts/up.sh        Create networks/volumes, start containers, apply firewall
 scripts/down.sh      Stop containers, remove networks, clear firewall (--volumes deletes data)
 scripts/backup.sh    One-off pg_dump to ./backups
 scripts/netcheck.sh  Test the reachability matrix
+scripts/evaluate.sh  Evaluate the project against criteria (PASS/FAIL summary)
 scripts/iptable_rules.sh  Re-apply only the firewall rules
 docs/incidents/      Incident notes
 ```
