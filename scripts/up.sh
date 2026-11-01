@@ -63,9 +63,18 @@ done
     || die "$SECRETS_DIR/DB_PASSWORD and POSTGRES_PASSWORD must hold the same password"
 
 
+# True if a container with exactly this name exists. `docker inspect db` alone
+# isn't enough: with no container named "db", Docker treats "db" as the start of
+# a container ID (it's valid hex) and returns any container whose ID begins "db".
+# (No grep -q: exiting early could fail the pipeline under pipefail.)
+container_exists() {
+    docker ps -a --format '{{.Names}}' | grep -x -- "$1" >/dev/null
+}
+
 # True if the container is running and, when it has a healthcheck, healthy.
 is_container_up() {
     local name="$1" running health
+    container_exists "$name" || return 1
     read -r running health < <(docker inspect -f \
         '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' \
         "$name" 2>/dev/null) || return 1
@@ -100,7 +109,12 @@ run_container() {
         log "container '$name' already up, skipping"
         return
     fi
-    docker rm -f "$name" &>/dev/null || true   # clear a stopped/failed old copy
+    # Clear a stopped/failed old copy. Only when it exists by name: otherwise
+    # `docker rm -f db` could delete an unrelated container whose ID starts with "db".
+    if container_exists "$name"; then
+        docker update --restart=no "$name" &>/dev/null || true
+        docker rm -f "$name" &>/dev/null || true
+    fi
     log "starting '$name'"
     docker run -d --name "$name" --network "$network" "${COMMON_OPTS[@]}" "$@" >/dev/null
     wait_for_container "$name"
