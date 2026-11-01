@@ -1,0 +1,14 @@
+================ Evaluation summary ================
+PASS  up_healthy       up.sh brings all services to healthy in <= 10 min (timed run in a new session)
+PASS  reachability     All reachability matrix cells match (netcheck.sh exits 0)
+PASS  dual_homed       Only the api is on both dmz and internal (docker network inspect dmz internal)
+PASS  published_ports  Only the proxy publishes ports (docker ps --format '{{.Names}} {{.Ports}}')
+PASS  app_works        Create a link, follow it, stats count the click (curl through the proxy)
+FAIL  api_image_size   api image size <= 200 MB (docker image inspect -f '{{.Size}}')
+PASS  process_user     No process runs as root in api and worker (docker top <container> -o user,pid,cmd)
+PASS  hardening        Every container: CapDrop ALL, ReadonlyRootfs true, memory and CPU limits (docker inspect)
+PASS  secret_exposure  DB password not in any container's Config.Env (docker inspect)
+PASS  durability       Same link count after down.sh and up.sh (count before and after)
+PASS  backup           backup.sh writes a .sql.gz containing your links (zcat the file and grep a code)
+PASS  vulnerabilities  0 fixable CRITICAL vulns in api and worker images (trivy --severity CRITICAL --ignore-unfixed --exit-code 1)
+====================================================
