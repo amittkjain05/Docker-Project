@@ -19,6 +19,10 @@ RUN_DIR="$REPO_DIR/logs/evaluate-$(date -u +%Y%m%dT%H%M%SZ)"
 
 SERVICES=(db redis api worker proxy)    # long-running containers started by up.sh
 UP_TIME_LIMIT=600                       # seconds (10 minutes)
+BASE_URL="https://localhost"            # the proxy, as a user would reach it
+API_IMAGE_LIMIT_MB=200                  # 1 MB = 1,000,000 bytes, as docker reports sizes
+CLICK_WAIT=30                           # seconds to wait for the worker to count a click
+SECRETS_DIR="/secrets"                  # same as up.sh
 
 # id|description, in the order they run
 CRITERIA=(
@@ -26,9 +30,21 @@ CRITERIA=(
     "reachability|All reachability matrix cells match (netcheck.sh exits 0)"
     "dual_homed|Only the api is on both dmz and internal (docker network inspect dmz internal)"
     "published_ports|Only the proxy publishes ports (docker ps --format '{{.Names}} {{.Ports}}')"
+    "app_works|Create a link, follow it, stats count the click (curl through the proxy)"
+    "api_image_size|api image size <= ${API_IMAGE_LIMIT_MB} MB (docker image inspect -f '{{.Size}}')"
+    "process_user|No process runs as root in api and worker (docker top <container> -o user,pid,cmd)"
+    "hardening|Every container: CapDrop ALL, ReadonlyRootfs true, memory and CPU limits (docker inspect)"
+    "secret_exposure|DB password not in any container's Config.Env (docker inspect)"
+    "durability|Same link count after down.sh and up.sh (count before and after)"
+    "backup|backup.sh writes a .sql.gz containing your links (zcat the file and grep a code)"
 )
 # Criteria that stop and restart the stack (used for the warning below)
-RESTARTS_STACK=(up_healthy)
+RESTARTS_STACK=(up_healthy durability)
+
+# Short code of a link created during this run; app_works sets it, and
+# durability and backup reuse it (or create one when run on their own).
+EVAL_CODE=""
+EVAL_URL=""
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -61,6 +77,51 @@ NEW_SESSION=(
     TERM="${TERM:-dumb}"
     bash --noprofile --norc
 )
+
+# Run a SQL query in the db container (local socket, no password needed).
+db_query() {
+    docker exec db psql -U linkly -d linkly -tAc "$1" 2>>"$RUN_DIR/db_query.log"
+}
+
+# curl through the proxy; -k because the certificate is self-signed.
+api_curl() { curl -sk --max-time 10 "$@"; }
+
+# Create a short link and store its code in EVAL_CODE. Returns 1 on failure.
+create_link() {
+    local url body code
+    url="https://example.com/linkly-eval-$(date +%s)-$RANDOM"
+    body=$(api_curl -X POST "$BASE_URL/links" -H 'Content-Type: application/json' \
+        -d "{\"url\": \"$url\"}" -w '\n%{http_code}') || return 1
+    [[ "${body##*$'\n'}" == 201 ]] || return 1
+    code=$(grep -o '"code": *"[A-Za-z0-9]*"' <<<"$body" | sed 's/.*"\([A-Za-z0-9]*\)"$/\1/')
+    [[ -n "$code" ]] || return 1
+    EVAL_CODE="$code"
+    EVAL_URL="$url"
+}
+
+# Make sure EVAL_CODE holds a link that exists, creating one if needed.
+ensure_link() {
+    [[ -n "$EVAL_CODE" ]] && return 0
+    command -v curl &>/dev/null || { detail "curl not installed; can't create a test link"; return 1; }
+    if create_link; then
+        detail "created test link $EVAL_CODE"
+    else
+        detail "could not create a test link via POST $BASE_URL/links"
+        return 1
+    fi
+}
+
+# Run down.sh then up.sh in new sessions; logs go to <prefix>-down.log / -up.log.
+restart_stack() {
+    local prefix="$1" rc
+    "${NEW_SESSION[@]}" "$SCRIPTS/down.sh" >"$RUN_DIR/$prefix-down.log" 2>&1 \
+        || detail "note: down.sh reported warnings (see $prefix-down.log)"
+    ( cd "$REPO_DIR" && timeout --foreground "$UP_TIME_LIMIT" \
+        "${NEW_SESSION[@]}" "$SCRIPTS/up.sh" ) >"$RUN_DIR/$prefix-up.log" 2>&1
+    rc=$?
+    (( rc == 0 )) || detail "up.sh failed (exit $rc, see $prefix-up.log)"
+    return "$rc"
+}
 
 # ---------------------------------------------------------------------------
 # Criteria
@@ -232,6 +293,212 @@ criterion_published_ports() {
     fi
     detail "publishing ports: proxy (only)"
     return 0
+}
+
+# End to end through the proxy, like the curl examples in the README:
+# create a link, follow it, and see the worker count the click.
+criterion_app_works() {
+    local status location clicks="" waited=0
+
+    command -v curl &>/dev/null || { detail "curl not installed"; return 1; }
+
+    if ! create_link; then
+        detail "POST $BASE_URL/links did not return 201 with a code"
+        return 1
+    fi
+    detail "POST /links -> 201, code $EVAL_CODE for $EVAL_URL"
+
+    read -r status location < <(api_curl -o /dev/null -w '%{http_code} %{redirect_url}\n' "$BASE_URL/$EVAL_CODE")
+    if [[ "${status:-}" != 302 || "${location:-}" != "$EVAL_URL" ]]; then
+        detail "GET /$EVAL_CODE -> ${status:-no response} ${location:-} (expected 302 to $EVAL_URL)"
+        return 1
+    fi
+    detail "GET /$EVAL_CODE -> 302 to $location"
+
+    # The click goes to Redis first; the worker moves it to Postgres shortly after.
+    while (( waited <= CLICK_WAIT )); do
+        clicks=$(api_curl "$BASE_URL/stats/$EVAL_CODE" | grep -o '"clicks": *[0-9]*' | grep -o '[0-9]*$')
+        (( ${clicks:-0} >= 1 )) && break
+        sleep 2; (( waited += 2 ))
+    done
+    if (( ${clicks:-0} >= 1 )); then
+        detail "GET /stats/$EVAL_CODE -> clicks=$clicks (after ${waited}s)"
+        return 0
+    fi
+    detail "GET /stats/$EVAL_CODE -> clicks=${clicks:-?} after ${CLICK_WAIT}s (expected >= 1; is the worker running?)"
+    return 1
+}
+
+# The image the api container runs is at most API_IMAGE_LIMIT_MB.
+criterion_api_image_size() {
+    local image name size limit
+    limit=$(( API_IMAGE_LIMIT_MB * 1000 * 1000 ))
+
+    image=$(docker inspect -f '{{.Image}}' api 2>/dev/null)
+    name=$(docker inspect -f '{{.Config.Image}}' api 2>/dev/null)
+    if [[ -z "$image" ]]; then
+        # api isn't running: fall back to the image up.sh would start.
+        local repo tag
+        repo=$(sed -n 's/^IMAGE_REPO="\([^"]*\)".*/\1/p' "$SCRIPTS/up.sh")
+        tag=$(sed -n 's/^APP_TAG="\([^"]*\)".*/\1/p' "$SCRIPTS/up.sh")
+        image="$repo:api_app-$tag"; name="$image"
+    fi
+
+    if ! size=$(docker image inspect -f '{{.Size}}' "$image" 2>/dev/null) || [[ ! "$size" =~ ^[0-9]+$ ]]; then
+        detail "could not inspect image $name (not pulled?)"
+        return 1
+    fi
+    detail "$name: $(awk -v s="$size" 'BEGIN{printf "%.1f MB (%.1f MiB)", s/1e6, s/1048576}') (limit ${API_IMAGE_LIMIT_MB} MB)"
+    (( size <= limit ))
+}
+
+# Neither the api nor the worker runs any process as root.
+criterion_process_user() {
+    local c out user pid cmd ok=0
+
+    for c in api worker; do
+        if ! out=$(docker top "$c" -o user,pid,cmd 2>&1); then
+            detail "$c: docker top failed: $out"
+            ok=1; continue
+        fi
+        echo "$out" >"$RUN_DIR/top-$c.txt"
+        while read -r user pid cmd; do
+            [[ -z "$user" || "$user" == USER ]] && continue
+            if [[ "$user" == root || "$user" == 0 ]]; then
+                detail "$c: pid $pid runs as root: $cmd"
+                ok=1
+            else
+                detail "$c: pid $pid runs as $user: $cmd"
+            fi
+        done <<<"$out"
+    done
+    return "$ok"
+}
+
+# Every service: all capabilities dropped, read-only root filesystem, and
+# memory and CPU limits.
+criterion_hardening() {
+    local c capdrop ro mem nano quota problems msg ok=0
+
+    docker inspect "${SERVICES[@]}" >"$RUN_DIR/hardening-inspect.json" 2>&1
+    for c in "${SERVICES[@]}"; do
+        if ! IFS='|' read -r capdrop ro mem nano quota < <(docker inspect -f \
+            '{{join .HostConfig.CapDrop ","}}|{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.Memory}}|{{.HostConfig.NanoCpus}}|{{.HostConfig.CpuQuota}}' \
+            "$c" 2>/dev/null); then
+            detail "$c: not found"
+            ok=1; continue
+        fi
+        problems=()
+        [[ ",${capdrop^^}," == *",ALL,"* ]] || problems+=("CapDrop is [${capdrop:-none}], not ALL")
+        [[ "$ro" == true ]]                 || problems+=("ReadonlyRootfs is $ro")
+        (( ${mem:-0} > 0 ))                 || problems+=("no memory limit")
+        (( ${nano:-0} > 0 || ${quota:-0} > 0 )) || problems+=("no CPU limit")
+        if (( ${#problems[@]} )); then
+            msg=$(printf '%s; ' "${problems[@]}")
+            detail "$c: ${msg%; }"
+            ok=1
+        else
+            detail "$c: CapDrop ALL, read-only, memory $(( mem / 1024 / 1024 ))m, cpus $(awk -v n="${nano:-0}" -v q="${quota:-0}" 'BEGIN{printf "%g", (n > 0 ? n / 1e9 : q / 1e5)}')"
+        fi
+    done
+    return "$ok"
+}
+
+# The database password never appears in a container's environment, and no
+# *PASSWORD variable holds a value (passwords come from /run/secrets files).
+# The password itself is never printed; saved env dumps have it masked.
+criterion_secret_exposure() {
+    local f c env name pw passwords=() ok=0 leaked
+
+    for f in DB_PASSWORD POSTGRES_PASSWORD; do
+        [[ -r "$SECRETS_DIR/$f" ]] || continue
+        pw=$(<"$SECRETS_DIR/$f"); pw="${pw%$'\n'}"
+        [[ -n "$pw" ]] && passwords+=("$pw")
+    done
+    if (( ${#passwords[@]} == 0 )); then
+        detail "can't read a password from $SECRETS_DIR to compare against"
+        return 1
+    fi
+
+    for c in "${SERVICES[@]}"; do
+        if ! env=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$c" 2>/dev/null); then
+            detail "$c: not found"
+            ok=1; continue
+        fi
+        leaked=0
+        for pw in "${passwords[@]}"; do
+            [[ "$env" == *"$pw"* ]] && leaked=1
+            env="${env//"$pw"/********}"
+        done
+        echo "$env" >"$RUN_DIR/env-$c.txt"
+        if (( leaked )); then
+            detail "$c: the password appears in Config.Env"
+            ok=1
+        fi
+        while IFS= read -r name; do
+            detail "$c: $name has a value in Config.Env"
+            ok=1
+        done < <(grep -oE '^[A-Za-z_]*PASSWORD=.+' <<<"$env" | cut -d= -f1)
+        (( leaked )) || grep -qE '^[A-Za-z_]*PASSWORD=.+' <<<"$env" || detail "$c: no password in Config.Env"
+    done
+    return "$ok"
+}
+
+# Links survive a full down.sh + up.sh (the pgdata volume keeps them).
+criterion_durability() {
+    local before after kept
+
+    ensure_link || return 1
+    before=$(db_query 'SELECT count(*) FROM links')
+    [[ "$before" =~ ^[0-9]+$ ]] || { detail "could not count links before (is db up?)"; return 1; }
+    detail "links before: $before"
+
+    log "restarting the stack with down.sh and up.sh"
+    restart_stack durability || return 1
+
+    after=$(db_query 'SELECT count(*) FROM links')
+    [[ "$after" =~ ^[0-9]+$ ]] || { detail "could not count links after the restart"; return 1; }
+    kept=$(db_query "SELECT count(*) FROM links WHERE code = '$EVAL_CODE'")
+    detail "links after: $after; test link $EVAL_CODE still there: $([[ "$kept" == 1 ]] && echo yes || echo no)"
+    [[ "$before" == "$after" && "$kept" == 1 ]]
+}
+
+# backup.sh writes a new, valid .sql.gz that contains the links table rows.
+criterion_backup() {
+    local marker file rc tab
+    tab=$'\t'
+
+    ensure_link || return 1
+    marker="$RUN_DIR/.backup-start"
+    touch "$marker"
+
+    log "running backup.sh; output in backup.log"
+    ( cd "$REPO_DIR" && "${NEW_SESSION[@]}" "$SCRIPTS/backup.sh" ) >"$RUN_DIR/backup.log" 2>&1
+    rc=$?
+    if (( rc != 0 )); then
+        detail "backup.sh failed (exit $rc); last lines:"
+        while IFS= read -r line; do detail "  $line"; done < <(tail -n 3 "$RUN_DIR/backup.log")
+        return 1
+    fi
+
+    file=$(find "$REPO_DIR/backups" -maxdepth 1 -name '*.sql.gz' -newer "$marker" 2>/dev/null | sort | tail -n 1)
+    if [[ -z "$file" ]]; then
+        detail "backup.sh succeeded but no new .sql.gz in $REPO_DIR/backups"
+        return 1
+    fi
+    detail "new backup: ${file#"$REPO_DIR"/} ($(du -h "$file" | cut -f1))"
+
+    if ! gzip -t "$file" 2>/dev/null; then
+        detail "the file is not a valid gzip archive"
+        return 1
+    fi
+    # pg_dump writes table rows as tab-separated lines, so match the code as a row's first field.
+    if zcat "$file" | grep -q "^${EVAL_CODE}${tab}"; then
+        detail "zcat | grep: found link $EVAL_CODE in the dump"
+        return 0
+    fi
+    detail "zcat | grep: link $EVAL_CODE not found in the dump"
+    return 1
 }
 
 # ---------------------------------------------------------------------------
