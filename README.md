@@ -64,9 +64,8 @@ You need all of the following on the machine that runs the containers.
 - [ ] `curl` (optional, for trying the API)
 
 **Files the scripts expect**
-- [ ] `/secrets/DB_PASSWORD` and `/secrets/POSTGRES_PASSWORD`, both holding the
-      **same** password (the API, worker and backup log in as the `linkly` user
-      that Postgres creates with `POSTGRES_PASSWORD`)
+- [ ] `secrets/DB_PASSWORD` and `secrets/POSTGRES_PASSWORD` in the project root,
+      both holding the **same** password (see step 2)
 - [ ] `proxy/certs/tls.crt` and `proxy/certs/tls.key` (git-ignored, so generate them)
 - [ ] The API and worker images, available locally or on Docker Hub (see step 3)
 
@@ -84,13 +83,18 @@ git clone https://github.com/amittkjain05/Docker-Project.git
 
 ### 2. Create the secrets
 
+Create both password files with the same password in `secrets/` in the
+project root (the folder is git-ignored):
+
 ```bash
-sudo mkdir -p /secrets
-PASS="$(openssl rand -hex 24)"
-echo "$PASS" | sudo tee /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD >/dev/null
-sudo chmod 755 /secrets
-sudo chmod 644 /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD
+cd ~/linkly/Docker-Project
+sudo mkdir -p secrets
+openssl rand -hex 24 | sudo tee secrets/DB_PASSWORD secrets/POSTGRES_PASSWORD >/dev/null
+sudo chmod 755 secrets && sudo chmod 644 secrets/DB_PASSWORD secrets/POSTGRES_PASSWORD
 ```
+
+Do this once. Postgres keeps the password it was first started with, so don't
+change it later unless you also delete the `pgdata` volume.
 
 The files must be readable inside the containers, which run as non-root users
 (the API and worker as UID 10001), hence mode `644`. `up.sh` checks these
@@ -227,7 +231,7 @@ sudo bash Docker-Project/scripts/backup.sh
 This starts a throwaway `postgres:16-alpine` container on the `admin` network
 only, runs `pg_dump` against `pgsql` and writes
 `backups/linkly-<UTC timestamp>.sql.gz` at the repo root. The container is
-removed when it finishes. Set `SECRETS_DIR` if your secrets aren't in `/secrets`.
+removed when it finishes. It reads the password from `secrets/` in the project root.
 
 To restore a dump into the running database:
 
@@ -289,7 +293,7 @@ does what that criterion needs.
 | `api_image_size` | Reads the size of the image the `api` container runs with `docker image inspect -f '{{.Size}}'`. Passes if it's at most 200 MB (1 MB = 1,000,000 bytes, as Docker shows it). If `api` isn't running, it checks the image `up.sh` would start. |
 | `process_user` | Runs `docker top api -o user,pid,cmd` and the same for `worker`. Passes if no process in either runs as `root` (UID 0). Saves each listing as `top-<container>.txt`. |
 | `hardening` | Reads each service's `docker inspect` settings. Passes if every container has `CapDrop` containing `ALL`, `ReadonlyRootfs` true, a memory limit and a CPU limit. Lists any setting that's missing per container, and saves the full output as `hardening-inspect.json`. |
-| `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `/secrets` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
+| `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `secrets/` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
 | `durability` | Counts the rows in `links`, runs `down.sh` and `up.sh` (in new sessions), then counts again. Passes if the count is unchanged and the test link still exists. Creates a test link first if needed. |
 | `backup` | Runs [`backup.sh`](scripts/backup.sh), then checks that a new `.sql.gz` appeared in `backups/`, that it's a valid gzip file, and that `zcat` of it contains the test link's code as a `links` row. Creates a test link first if needed. |
 | `vulnerabilities` | Runs `trivy image --severity CRITICAL --ignore-unfixed --exit-code 1` on the `api` and `worker` images (the ones built from this repo). Passes if Trivy exits 0 for both, meaning no CRITICAL vulnerability that has a fix available. On failure it shows the count and the first few CVE/GHSA IDs; full reports are saved as `trivy-<container>.txt`. Uses an installed `trivy`, or else runs the `aquasec/trivy` image with the Docker socket mounted. The first run downloads Trivy's vulnerability database, so it needs internet access. |

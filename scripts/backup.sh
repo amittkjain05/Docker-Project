@@ -9,7 +9,7 @@ NETWORK="admin"
 DB_HOST="pgsql"
 DB_NAME="linkly"
 DB_USER="linkly"
-SECRETS_DIR="${SECRETS_DIR:-/secrets}"
+SECRETS_DIR="$(cd "$(dirname "$0")/.." && pwd)/secrets"   # same as up.sh
 BACKUP_DIR="$(cd "$(dirname "$0")/.." && pwd)/backups"
 
 log() { echo "[backup] $*"; }
