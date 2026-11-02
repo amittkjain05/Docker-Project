@@ -64,9 +64,6 @@ You need all of the following on the machine that runs the containers.
 - [ ] `curl` (optional, for trying the API)
 
 **Files the scripts expect**
-- [ ] `/secrets/DB_PASSWORD` and `/secrets/POSTGRES_PASSWORD`, both holding the
-      **same** password (the API, worker and backup log in as the `linkly` user
-      that Postgres creates with `POSTGRES_PASSWORD`)
 - [ ] `proxy/certs/tls.crt` and `proxy/certs/tls.key` (git-ignored, so generate them)
 - [ ] The API and worker images, available locally or on Docker Hub (see step 3)
 
@@ -82,20 +79,31 @@ mkdir -p ~/linkly && cd ~/linkly
 git clone https://github.com/amittkjain05/Docker-Project.git
 ```
 
-### 2. Create the secrets
+### 2. Secrets (automatic)
 
-```bash
-sudo mkdir -p /secrets
-PASS="$(openssl rand -hex 24)"
-echo "$PASS" | sudo tee /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD >/dev/null
-sudo chmod 755 /secrets
-sudo chmod 644 /secrets/DB_PASSWORD /secrets/POSTGRES_PASSWORD
-```
+Nothing to do. `up.sh` keeps the database password in
+`Docker-Project/secrets/DB_PASSWORD` and `secrets/POSTGRES_PASSWORD`. Both
+files hold the same password, and the folder is git-ignored. The path comes
+from the script's own location, so it's the same whichever folder you run
+`up.sh` from.
 
-The files must be readable inside the containers, which run as non-root users
-(the API and worker as UID 10001), hence mode `644`. `up.sh` checks these
-permissions and that both files hold the same password before starting
-anything. Keep the host itself restricted to trusted users.
+On each run, `up.sh`:
+- **uses the files** if both exist (and stops if they differ),
+- **copies one to the other** if only one exists,
+- **reuses the password from the old `/secrets` folder** if that's where you
+  kept it before, so an existing database keeps working,
+- **generates a random password** if there's none anywhere and no database yet.
+
+If there's no password anywhere but the `pgdata` volume already has a
+database, `up.sh` stops instead of generating one. Postgres only sets the
+password when it first creates the database, so a new one wouldn't match. Put
+the original password in both files, or start fresh with
+`scripts/down.sh --volumes` (deletes all data).
+
+The files are mode `644` and the folder `755`, because the containers read
+them as non-root users (the API and worker as UID 10001, Postgres as UID 70).
+Keep the host itself restricted to trusted users. To use a different folder,
+set `SECRETS_DIR`, for example `sudo SECRETS_DIR=/srv/linkly-secrets bash scripts/up.sh`.
 
 ### 3. Build the application images
 
@@ -131,7 +139,8 @@ sudo bash Docker-Project/scripts/up.sh
 ```
 
 The script:
-1. Checks the secrets, the proxy config and the certificates.
+1. Creates or checks the secrets (see step 2), and checks the proxy config and
+   the certificates.
 2. Creates the `dmz`, `internal` (no internet) and `admin` (no internet) networks
    and the `pgdata`, `redisdata` and `reports` volumes.
 3. Starts `pgsql → redis → api → worker → proxy` with fixed IPs, waiting for each to
@@ -227,7 +236,7 @@ sudo bash Docker-Project/scripts/backup.sh
 This starts a throwaway `postgres:16-alpine` container on the `admin` network
 only, runs `pg_dump` against `pgsql` and writes
 `backups/linkly-<UTC timestamp>.sql.gz` at the repo root. The container is
-removed when it finishes. Set `SECRETS_DIR` if your secrets aren't in `/secrets`.
+removed when it finishes. It reads the password from `secrets/` (or `SECRETS_DIR`).
 
 To restore a dump into the running database:
 
@@ -289,7 +298,7 @@ does what that criterion needs.
 | `api_image_size` | Reads the size of the image the `api` container runs with `docker image inspect -f '{{.Size}}'`. Passes if it's at most 200 MB (1 MB = 1,000,000 bytes, as Docker shows it). If `api` isn't running, it checks the image `up.sh` would start. |
 | `process_user` | Runs `docker top api -o user,pid,cmd` and the same for `worker`. Passes if no process in either runs as `root` (UID 0). Saves each listing as `top-<container>.txt`. |
 | `hardening` | Reads each service's `docker inspect` settings. Passes if every container has `CapDrop` containing `ALL`, `ReadonlyRootfs` true, a memory limit and a CPU limit. Lists any setting that's missing per container, and saves the full output as `hardening-inspect.json`. |
-| `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `/secrets` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
+| `secret_exposure` | Reads each container's `Config.Env`. Passes if the password from `secrets/` appears in none of them and no `*PASSWORD` variable holds a value (`DB_PASSWORD_FILE` paths are fine). The password is never printed; the saved `env-<container>.txt` files have it masked. |
 | `durability` | Counts the rows in `links`, runs `down.sh` and `up.sh` (in new sessions), then counts again. Passes if the count is unchanged and the test link still exists. Creates a test link first if needed. |
 | `backup` | Runs [`backup.sh`](scripts/backup.sh), then checks that a new `.sql.gz` appeared in `backups/`, that it's a valid gzip file, and that `zcat` of it contains the test link's code as a `links` row. Creates a test link first if needed. |
 | `vulnerabilities` | Runs `trivy image --severity CRITICAL --ignore-unfixed --exit-code 1` on the `api` and `worker` images (the ones built from this repo). Passes if Trivy exits 0 for both, meaning no CRITICAL vulnerability that has a fix available. On failure it shows the count and the first few CVE/GHSA IDs; full reports are saved as `trivy-<container>.txt`. Uses an installed `trivy`, or else runs the `aquasec/trivy` image with the Docker socket mounted. The first run downloads Trivy's vulnerability database, so it needs internet access. |

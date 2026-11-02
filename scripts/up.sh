@@ -9,7 +9,11 @@ REPO_DIR="Docker-Project"   # used only when this script isn't run from inside a
 IMAGE_REPO="amitjain6/linkly_app"   # Docker Hub image name (not the web page URL)
 #APP_TAG="$(git rev-parse --short HEAD 2>/dev/null || echo dev)"
 APP_TAG="67f6b8d"
-SECRETS_DIR="/secrets"
+# Password files live in <repo>/secrets (git-ignored). The path is worked out
+# from where this script lives, so it's correct whichever folder you run it
+# from. Set SECRETS_DIR to use another folder. Missing files are created.
+SECRETS_DIR="${SECRETS_DIR:-}"
+LEGACY_SECRETS_DIR="/secrets"   # old location; its password is reused if found
 WAIT_TIMEOUT=60   # seconds to wait for each container to come up
 #API_IMAGE="${API_IMAGE:-linkly-api:$TAG}"
 #WORKER_IMAGE="${WORKER_IMAGE:-linkly-worker:$TAG}"
@@ -42,7 +46,7 @@ COMMON_OPTS=(
 )
 # Options shared by some containers
 TMPFS_TMP=(--tmpfs /tmp:rw,noexec,nosuid,size=100m,mode=1777)
-SECRETS_MOUNT=(--mount "type=bind,source=${SECRETS_DIR},target=/run/secrets,readonly")
+# SECRETS_MOUNT is set in Pre-checks, once SECRETS_DIR is resolved.
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,17 +54,64 @@ SECRETS_MOUNT=(--mount "type=bind,source=${SECRETS_DIR},target=/run/secrets,read
 log() { echo "[up] $*"; }
 die() { echo "[up] ERROR: $*" >&2; exit 1; }
 
-# The api and worker (UID 10001) and Postgres (after it drops root) read these
-# files, so the folder must be enterable and the files readable by other users.
-perm_has() { (( 8#$(stat -c %a "$1") & $2 )); }
-[[ -d "$SECRETS_DIR" ]] || die "missing $SECRETS_DIR folder"
-perm_has "$SECRETS_DIR" 1 || die "$SECRETS_DIR must be enterable by containers: chmod 755 $SECRETS_DIR"
-for f in DB_PASSWORD POSTGRES_PASSWORD; do
-    [[ -f "$SECRETS_DIR/$f" ]] || die "missing $SECRETS_DIR/$f"
-    perm_has "$SECRETS_DIR/$f" 4 || die "$SECRETS_DIR/$f must be readable by containers: chmod 644 $SECRETS_DIR/$f"
-done
-[[ "$(cat "$SECRETS_DIR/DB_PASSWORD")" == "$(cat "$SECRETS_DIR/POSTGRES_PASSWORD")" ]] \
-    || die "$SECRETS_DIR/DB_PASSWORD and POSTGRES_PASSWORD must hold the same password"
+# A random 48-character hex password (never printed).
+gen_password() {
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 24
+    else
+        head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'; echo
+    fi
+}
+
+# True if the pgdata volume already holds an initialized database. Postgres
+# sets the password only when it first initializes the volume, so a new
+# password would lock the api and worker out of an existing database.
+# If we can't look inside, assume it's initialized (the safe answer).
+pgdata_initialized() {
+    local mp
+    docker volume inspect pgdata &>/dev/null || return 1
+    mp=$(docker volume inspect -f '{{.Mountpoint}}' pgdata 2>/dev/null) || return 0
+    [[ -d "$mp" ]] || return 0
+    [[ -f "$mp/PG_VERSION" ]]
+}
+
+# Make sure SECRETS_DIR holds DB_PASSWORD and POSTGRES_PASSWORD with the same
+# password, readable by the containers. Reuses an existing password if there
+# is one (here or in the old /secrets folder); otherwise generates one.
+ensure_secrets() {
+    local db="$SECRETS_DIR/DB_PASSWORD" pg="$SECRETS_DIR/POSTGRES_PASSWORD" pw
+
+    mkdir -p "$SECRETS_DIR"
+    if [[ -s "$db" && -s "$pg" ]]; then
+        [[ "$(<"$db")" == "$(<"$pg")" ]] \
+            || die "$db and $pg hold different passwords; make them the same (the one Postgres was set up with)"
+    elif [[ -s "$db" || -s "$pg" ]]; then
+        if [[ -s "$db" ]]; then cp "$db" "$pg"; else cp "$pg" "$db"; fi
+        log "secrets: one password file was missing; copied it from the other"
+    elif [[ -s "$LEGACY_SECRETS_DIR/DB_PASSWORD" || -s "$LEGACY_SECRETS_DIR/POSTGRES_PASSWORD" ]]; then
+        if [[ -s "$LEGACY_SECRETS_DIR/DB_PASSWORD" ]]; then
+            pw=$(<"$LEGACY_SECRETS_DIR/DB_PASSWORD")
+        else
+            pw=$(<"$LEGACY_SECRETS_DIR/POSTGRES_PASSWORD")
+        fi
+        printf '%s\n' "$pw" >"$db"; printf '%s\n' "$pw" >"$pg"
+        log "secrets: reused the existing password from $LEGACY_SECRETS_DIR"
+    elif pgdata_initialized; then
+        die "no password files in $SECRETS_DIR, but the pgdata volume already has a database.
+       A new password would not match it. Either:
+         - put the password it was created with into $db and $pg, or
+         - delete the data and start fresh: scripts/down.sh --volumes"
+    else
+        pw=$(gen_password)
+        [[ -n "$pw" ]] || die "could not generate a password"
+        printf '%s\n' "$pw" >"$db"; printf '%s\n' "$pw" >"$pg"
+        log "secrets: generated a new random password in $SECRETS_DIR"
+    fi
+
+    # The api and worker (UID 10001) and Postgres (UID 70) read these files.
+    chmod 755 "$SECRETS_DIR"
+    chmod 644 "$db" "$pg"
+}
 
 
 # True if the container is running and, when it has a healthcheck, healthy.
@@ -170,7 +221,14 @@ if [[ -d "$SCRIPT_REPO/proxy" ]]; then
 elif [[ ! -d "$REPO_DIR" ]]; then
     git clone "$REPO_URL" "$REPO_DIR" || die "failed to clone repository; check your connection"
 fi
-log "using repository at $(cd "$REPO_DIR" && pwd)"
+REPO_DIR="$(cd "$REPO_DIR" && pwd)"
+log "using repository at $REPO_DIR"
+
+# Absolute path, so the bind mount works whatever the current folder is.
+SECRETS_DIR="${SECRETS_DIR:-$REPO_DIR/secrets}"
+mkdir -p "$SECRETS_DIR"
+SECRETS_DIR="$(cd "$SECRETS_DIR" && pwd)"
+SECRETS_MOUNT=(--mount "type=bind,source=${SECRETS_DIR},target=/run/secrets,readonly")
 
 # Proxy config and certificates are bind-mounted, so they must exist (absolute path needed).
 # proxy/certs/ is in .gitignore, so a fresh clone won't have the certificates.
@@ -184,6 +242,10 @@ if ! command -v docker &>/dev/null; then
     apt-get update && apt-get install -y docker.io
     systemctl enable --now docker || true
 fi
+
+# Before ensure_volume below, which would create an empty pgdata volume.
+ensure_secrets
+log "secrets: using $SECRETS_DIR"
 
 # ---------------------------------------------------------------------------
 # Networks and volumes

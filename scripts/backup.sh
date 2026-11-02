@@ -9,13 +9,15 @@ NETWORK="admin"
 DB_HOST="pgsql"
 DB_NAME="linkly"
 DB_USER="linkly"
-SECRETS_DIR="${SECRETS_DIR:-/secrets}"
-BACKUP_DIR="$(cd "$(dirname "$0")/.." && pwd)/backups"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SECRETS_DIR="${SECRETS_DIR:-$REPO_DIR/secrets}"   # same default as up.sh; absolute
+BACKUP_DIR="$REPO_DIR/backups"
 
 log() { echo "[backup] $*"; }
 die() { echo "[backup] ERROR: $*" >&2; exit 1; }
 
-[[ -f "$SECRETS_DIR/DB_PASSWORD" ]] || die "missing $SECRETS_DIR/DB_PASSWORD"
+[[ -f "$SECRETS_DIR/DB_PASSWORD" ]] || die "missing $SECRETS_DIR/DB_PASSWORD (scripts/up.sh creates it)"
+SECRETS_DIR="$(cd "$SECRETS_DIR" && pwd)"   # the bind mount needs an absolute path
 
 # The pgsql container must be running and attached to the admin network.
 [[ "$(docker inspect -f '{{.State.Running}}' "$DB_HOST" 2>/dev/null)" == "true" ]] \
