@@ -64,6 +64,8 @@ You need all of the following on the machine that runs the containers.
 - [ ] `curl` (optional, for trying the API)
 
 **Files the scripts expect**
+- [ ] `secrets/DB_PASSWORD` and `secrets/POSTGRES_PASSWORD` in the project root,
+      both holding the **same** password (see step 2)
 - [ ] `proxy/certs/tls.crt` and `proxy/certs/tls.key` (git-ignored, so generate them)
 - [ ] The API and worker images, available locally or on Docker Hub (see step 3)
 
@@ -79,15 +81,25 @@ mkdir -p ~/linkly && cd ~/linkly
 git clone https://github.com/amittkjain05/Docker-Project.git
 ```
 
-### 2. Secrets (automatic)
+### 2. Create the secrets
 
-Nothing to do. On the first run, `up.sh` creates `secrets/DB_PASSWORD` and
-`secrets/POSTGRES_PASSWORD` in the project root with the same random password.
-The folder is git-ignored. Later runs reuse the files and never change them,
-because Postgres keeps the password it was first started with.
+Create both password files with the same password in `secrets/` in the
+project root (the folder is git-ignored):
 
-The files are mode `644` so the non-root containers can read them. Keep the
-host itself restricted to trusted users.
+```bash
+cd ~/linkly/Docker-Project
+sudo mkdir -p secrets
+openssl rand -hex 24 | sudo tee secrets/DB_PASSWORD secrets/POSTGRES_PASSWORD >/dev/null
+sudo chmod 755 secrets && sudo chmod 644 secrets/DB_PASSWORD secrets/POSTGRES_PASSWORD
+```
+
+Do this once. Postgres keeps the password it was first started with, so don't
+change it later unless you also delete the `pgdata` volume.
+
+The files must be readable inside the containers, which run as non-root users
+(the API and worker as UID 10001), hence mode `644`. `up.sh` checks these
+permissions and that both files hold the same password before starting
+anything. Keep the host itself restricted to trusted users.
 
 ### 3. Build the application images
 
@@ -123,7 +135,7 @@ sudo bash Docker-Project/scripts/up.sh
 ```
 
 The script:
-1. Creates the secrets on the first run (see step 2), and checks the proxy config and the certificates.
+1. Checks the secrets, the proxy config and the certificates.
 2. Creates the `dmz`, `internal` (no internet) and `admin` (no internet) networks
    and the `pgdata`, `redisdata` and `reports` volumes.
 3. Starts `pgsql → redis → api → worker → proxy` with fixed IPs, waiting for each to

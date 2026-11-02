@@ -50,16 +50,16 @@ SECRETS_MOUNT=(--mount "type=bind,source=${SECRETS_DIR},target=/run/secrets,read
 log() { echo "[up] $*"; }
 die() { echo "[up] ERROR: $*" >&2; exit 1; }
 
-# First run: create both password files with the same random password.
-# Existing files are never changed (Postgres keeps the password it started with).
-if [[ ! -f "$SECRETS_DIR/DB_PASSWORD" ]]; then
-    mkdir -p "$SECRETS_DIR"
-    openssl rand -hex 24 | tee "$SECRETS_DIR/DB_PASSWORD" >"$SECRETS_DIR/POSTGRES_PASSWORD"
-    log "created new passwords in $SECRETS_DIR"
-fi
-# Readable by the non-root containers (api/worker UID 10001, Postgres UID 70).
-chmod 755 "$SECRETS_DIR" && chmod 644 "$SECRETS_DIR"/*_PASSWORD
-cmp -s "$SECRETS_DIR/DB_PASSWORD" "$SECRETS_DIR/POSTGRES_PASSWORD" \
+# The api and worker (UID 10001) and Postgres (after it drops root) read these
+# files, so the folder must be enterable and the files readable by other users.
+perm_has() { (( 8#$(stat -c %a "$1") & $2 )); }
+[[ -d "$SECRETS_DIR" ]] || die "missing $SECRETS_DIR folder"
+perm_has "$SECRETS_DIR" 1 || die "$SECRETS_DIR must be enterable by containers: chmod 755 $SECRETS_DIR"
+for f in DB_PASSWORD POSTGRES_PASSWORD; do
+    [[ -f "$SECRETS_DIR/$f" ]] || die "missing $SECRETS_DIR/$f"
+    perm_has "$SECRETS_DIR/$f" 4 || die "$SECRETS_DIR/$f must be readable by containers: chmod 644 $SECRETS_DIR/$f"
+done
+[[ "$(cat "$SECRETS_DIR/DB_PASSWORD")" == "$(cat "$SECRETS_DIR/POSTGRES_PASSWORD")" ]] \
     || die "$SECRETS_DIR/DB_PASSWORD and POSTGRES_PASSWORD must hold the same password"
 
 
