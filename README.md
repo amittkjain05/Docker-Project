@@ -81,29 +81,13 @@ git clone https://github.com/amittkjain05/Docker-Project.git
 
 ### 2. Secrets (automatic)
 
-Nothing to do. `up.sh` keeps the database password in
-`Docker-Project/secrets/DB_PASSWORD` and `secrets/POSTGRES_PASSWORD`. Both
-files hold the same password, and the folder is git-ignored. The path comes
-from the script's own location, so it's the same whichever folder you run
-`up.sh` from.
+Nothing to do. On the first run, `up.sh` creates `secrets/DB_PASSWORD` and
+`secrets/POSTGRES_PASSWORD` in the project root with the same random password.
+The folder is git-ignored. Later runs reuse the files and never change them,
+because Postgres keeps the password it was first started with.
 
-On each run, `up.sh`:
-- **uses the files** if both exist (and stops if they differ),
-- **copies one to the other** if only one exists,
-- **reuses the password from the old `/secrets` folder** if that's where you
-  kept it before, so an existing database keeps working,
-- **generates a random password** if there's none anywhere and no database yet.
-
-If there's no password anywhere but the `pgdata` volume already has a
-database, `up.sh` stops instead of generating one. Postgres only sets the
-password when it first creates the database, so a new one wouldn't match. Put
-the original password in both files, or start fresh with
-`scripts/down.sh --volumes` (deletes all data).
-
-The files are mode `644` and the folder `755`, because the containers read
-them as non-root users (the API and worker as UID 10001, Postgres as UID 70).
-Keep the host itself restricted to trusted users. To use a different folder,
-set `SECRETS_DIR`, for example `sudo SECRETS_DIR=/srv/linkly-secrets bash scripts/up.sh`.
+The files are mode `644` so the non-root containers can read them. Keep the
+host itself restricted to trusted users.
 
 ### 3. Build the application images
 
@@ -139,8 +123,7 @@ sudo bash Docker-Project/scripts/up.sh
 ```
 
 The script:
-1. Creates or checks the secrets (see step 2), and checks the proxy config and
-   the certificates.
+1. Creates the secrets on the first run (see step 2), and checks the proxy config and the certificates.
 2. Creates the `dmz`, `internal` (no internet) and `admin` (no internet) networks
    and the `pgdata`, `redisdata` and `reports` volumes.
 3. Starts `pgsql → redis → api → worker → proxy` with fixed IPs, waiting for each to
@@ -236,7 +219,7 @@ sudo bash Docker-Project/scripts/backup.sh
 This starts a throwaway `postgres:16-alpine` container on the `admin` network
 only, runs `pg_dump` against `pgsql` and writes
 `backups/linkly-<UTC timestamp>.sql.gz` at the repo root. The container is
-removed when it finishes. It reads the password from `secrets/` (or `SECRETS_DIR`).
+removed when it finishes. It reads the password from `secrets/` in the project root.
 
 To restore a dump into the running database:
 

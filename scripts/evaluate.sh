@@ -22,7 +22,7 @@ UP_TIME_LIMIT=600                       # seconds (10 minutes)
 BASE_URL="https://localhost"            # the proxy, as a user would reach it
 API_IMAGE_LIMIT_MB=200                  # 1 MB = 1,000,000 bytes, as docker reports sizes
 CLICK_WAIT=30                           # seconds to wait for the worker to count a click
-SECRETS_DIR="${SECRETS_DIR:-$REPO_DIR/secrets}"   # same default as up.sh
+SECRETS_DIR="$REPO_DIR/secrets"         # same as up.sh
 SCAN_CONTAINERS=(api worker)            # images built from this repo, scanned by Trivy
 TRIVY_FLAGS=(--severity CRITICAL --ignore-unfixed --exit-code 1)
 TRIVY_DOCKER_IMAGE="aquasec/trivy:0.56.2"   # used only when trivy isn't installed
