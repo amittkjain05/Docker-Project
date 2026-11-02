@@ -319,7 +319,6 @@ scripts/down.sh      Stop containers, remove networks, clear firewall (--volumes
 scripts/backup.sh    One-off pg_dump to ./backups
 scripts/netcheck.sh  Test the reachability matrix
 scripts/evaluate.sh  Evaluate the project against criteria (PASS/FAIL summary)
-scripts/iptable_rules.sh  Re-apply only the firewall rules
 docs/incidents/      Incident notes
 ```
 
